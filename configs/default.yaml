@@ -1,0 +1,83 @@
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  underlying_path: data/underlying/spy_eod.parquet
+  outputs_dir: outputs
+
+surface:
+  x_min: -0.3
+  x_max: 0.3
+  nx: 21
+  tenors_days: [7, 14, 30, 60, 90, 180]
+
+repair:
+  lambda_smooth: 0.001
+  data_weight: 1.0
+
+train:
+  seed: 42
+  batch_size: 64
+  epochs: 20
+  lr: 0.001
+  weight_decay: 0.000001
+  hidden_size: 128
+  flow_layers: 4
+  early_stopping_patience: 5
+
+strategy:
+  signal_provider: deep_flow
+  run_all_providers: false
+  providers: [deep_flow, climatology, last_value, linear_context]
+  direction_mode: mean_revert
+  threshold: 4.0
+  zscore_quantile: 0.9
+  min_history_for_quantile: 20
+  min_signal_abs: 0.001
+  edge_cost_multiplier: 1.25
+  edge_signal_to_usd_scale: 1.0
+  residual_clip: 1.0
+  reject_if_residual_clipped: false
+  unit_sanity_check: true
+  unit_sanity_fail_fast: false
+  n_samples: 32
+  max_trades_per_day: 3
+  execution_mode: worse_than_touch
+  execution_impact_bps: 0.0
+  execution_fee_per_contract: 0.0
+  execution_worse_touch_extra_half_spread: 0.5
+  spread_gate_mode: abs_or_rel
+  max_spread_abs: 3.0
+  max_spread_rel: 0.35
+  max_contracts: 10
+  max_notional: 25000
+  seed: 42
+  provider_overrides:
+    climatology:
+      threshold: 0.0
+      zscore_quantile: 0.8
+    last_value:
+      threshold: 0.0
+      zscore_quantile: 0.8
+    linear_context:
+      threshold: 0.0
+      zscore_quantile: 0.85
+
+walkforward:
+  train_days: 40
+  test_days: 10
+  step_days: 10
+
+tradier:
+  base_url: https://api.tradier.com
+  token_env_var: TRADIER_TOKEN
+  cache_enabled: true
+  cache_dir: data/tradier_cache
+  connect_timeout: 10.0
+  read_timeout: 30.0
+  max_retries: 4
+  backoff_base: 0.5
+
+synth:
+  seed: 123
+  bad_quote_prob: 0.02
+  strike_points: 21

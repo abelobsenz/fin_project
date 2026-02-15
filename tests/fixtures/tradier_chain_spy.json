@@ -1,0 +1,42 @@
+{
+  "options": {
+    "option": [
+      {
+        "symbol": "SPY240216C00470000",
+        "option_type": "call",
+        "strike": 470,
+        "expiration_date": "2024-02-16",
+        "bid": 9.8,
+        "ask": 10.2,
+        "last": 10.0,
+        "volume": 1234,
+        "open_interest": 5678,
+        "greeks": {
+          "delta": 0.52,
+          "gamma": 0.03,
+          "theta": -0.11,
+          "vega": 0.21,
+          "mid_iv": 0.19
+        }
+      },
+      {
+        "symbol": "SPY240216P00470000",
+        "option_type": "put",
+        "strike": 470,
+        "expiration_date": "2024-02-16",
+        "bid": 9.6,
+        "ask": 10.1,
+        "last": 9.9,
+        "volume": 1100,
+        "open_interest": 4900,
+        "greeks": {
+          "delta": -0.48,
+          "gamma": 0.03,
+          "theta": -0.10,
+          "vega": 0.20,
+          "mid_iv": 0.2
+        }
+      }
+    ]
+  }
+}

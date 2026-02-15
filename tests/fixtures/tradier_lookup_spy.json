@@ -1,0 +1,22 @@
+{
+  "options": {
+    "option": [
+      {
+        "symbol": "SPY240216C00470000",
+        "rootsymbol": "SPY",
+        "strike": 470,
+        "expiration": "2024-02-16",
+        "type": "call",
+        "description": "SPY Feb 16 2024 470 Call"
+      },
+      {
+        "symbol": "SPY240216P00470000",
+        "rootsymbol": "SPY",
+        "strike": 470,
+        "expiration": "2024-02-16",
+        "type": "put",
+        "description": "SPY Feb 16 2024 470 Put"
+      }
+    ]
+  }
+}
