@@ -1,0 +1,10 @@
+{
+  "provider": "deep_flow",
+  "n_days": 63,
+  "trade_days": 39,
+  "sum_trades": 117,
+  "total_pnl": -77388.89855048235,
+  "sharpe": -19.373716021693895,
+  "max_drawdown": -77388.89855048236,
+  "turnover_ratio": 57.05126706196655
+}

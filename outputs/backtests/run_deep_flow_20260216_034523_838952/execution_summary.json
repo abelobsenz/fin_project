@@ -1,0 +1,26 @@
+{
+  "n_trades": 0,
+  "execution_model": {
+    "mode": "worse_than_touch",
+    "impact_bps": 0.0,
+    "fee_per_contract": 0.0,
+    "worse_touch_extra_half_spread": 0.5,
+    "max_spread_abs": 3.0,
+    "max_spread_rel": 0.35,
+    "spread_gate_mode": "abs_or_rel"
+  },
+  "avg_spread_paid": 0.0,
+  "avg_fill_slippage": 0.0,
+  "avg_fees": 0.0,
+  "spread_paid_quantiles": {
+    "p50": 0.0,
+    "p90": 0.0,
+    "p99": 0.0
+  },
+  "fill_slippage_quantiles": {
+    "p50": 0.0,
+    "p90": 0.0,
+    "p99": 0.0
+  },
+  "pct_skipped_by_spread": 0.0
+}

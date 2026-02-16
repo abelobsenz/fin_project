@@ -1,0 +1,18 @@
+{
+  "n_obs": 250,
+  "target_mode": "delta_theta_raw",
+  "mean_log_likelihood": 3.8367059230804443,
+  "median_log_likelihood": 3.824500799179077,
+  "sample_arb_pass_rate": 0.96875,
+  "sample_violations_avg": {
+    "strike_monotonic": 0.0,
+    "strike_convex": 0.0,
+    "calendar": 0.34375
+  },
+  "iv_rmse": 0.16435820014216979,
+  "iv_mae": 0.10653454043579708,
+  "iv_rmse_core_x15_t30": 0.046661283044128324,
+  "iv_mae_core_x15_t30": 0.037238670640546624,
+  "iv_rmse_weighted": 0.10635102062286154,
+  "iv_mae_weighted": 0.0670027002041014
+}

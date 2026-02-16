@@ -1,0 +1,73 @@
+{
+  "n_trades": 117,
+  "cost_breakdown": {
+    "spread_paid": 75110.13053194927,
+    "fill_slippage": 0.0,
+    "fees": 0.0
+  },
+  "edge": {
+    "mean_edge_gross_usd": 521.9796940870413,
+    "median_edge_gross_usd": 453.8600852193948,
+    "mean_edge_net_usd": -119.98723353645667,
+    "median_edge_net_usd": -219.28309688306547
+  },
+  "hit_rate": 0.0,
+  "avg_hold_days": 1.0,
+  "tail_losses": {
+    "p1": -1204.9871285998706,
+    "p5": -1129.0113492114888,
+    "p10": -1066.3863714278414
+  },
+  "per_structure": {
+    "calendar": {
+      "trades": 39,
+      "total_pnl": -11832.23663415816,
+      "mean_pnl": -303.39068292713233,
+      "median_pnl": -312.393231140285,
+      "hit_rate": 0.0,
+      "spread_paid": 10090.00153535522,
+      "fill_slippage": 0.0,
+      "fees": 0.0,
+      "edge_gross_usd": 1354.0976421309524,
+      "edge_net_usd": -8735.903893224267,
+      "delta_proxy": 0.0,
+      "vega_proxy": -270.7182038105753,
+      "gamma_proxy": 100.53856222432053
+    },
+    "fly": {
+      "trades": 39,
+      "total_pnl": -37755.841490791565,
+      "mean_pnl": -968.0984997638863,
+      "median_pnl": -961.3881057957552,
+      "hit_rate": 0.0,
+      "spread_paid": 37504.55232466203,
+      "fill_slippage": 0.0,
+      "fees": 0.0,
+      "edge_gross_usd": 23436.271514917284,
+      "edge_net_usd": -14068.280809744747,
+      "delta_proxy": -28.405991935152457,
+      "vega_proxy": 390.0263616456673,
+      "gamma_proxy": -65.66096376170047
+    },
+    "rr": {
+      "trades": 39,
+      "total_pnl": -27800.820425532635,
+      "mean_pnl": -712.8415493726317,
+      "median_pnl": -683.3913560029156,
+      "hit_rate": 0.0,
+      "spread_paid": 27515.576671932016,
+      "fill_slippage": 0.0,
+      "fees": 0.0,
+      "edge_gross_usd": 36281.2550511356,
+      "edge_net_usd": 8765.678379203582,
+      "delta_proxy": -1.6922580648475396,
+      "vega_proxy": 799.8674030449681,
+      "gamma_proxy": -8.56329501281638
+    }
+  },
+  "exposure_proxy_totals": {
+    "delta_proxy": -30.09825,
+    "vega_proxy": 919.1755608800603,
+    "gamma_proxy": 26.314303449803663
+  }
+}

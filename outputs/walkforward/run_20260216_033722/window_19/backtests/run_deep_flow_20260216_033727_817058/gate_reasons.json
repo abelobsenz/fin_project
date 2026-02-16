@@ -1,0 +1,25 @@
+{
+  "global": {
+    "rejected_quantile_gate": 9
+  },
+  "by_structure": {
+    "rr": {
+      "rejected_quantile_gate": 9
+    },
+    "fly": {
+      "rejected_quantile_gate": 9
+    },
+    "calendar": {
+      "rejected_quantile_gate": 9
+    }
+  },
+  "meta": {
+    "attempted_structure_checks": 0,
+    "provider": "deep_flow",
+    "units": {
+      "edge": "USD (proxy)",
+      "cost": "USD",
+      "signal": "normalized_call_surface_residual"
+    }
+  }
+}

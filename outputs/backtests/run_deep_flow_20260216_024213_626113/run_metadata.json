@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-02-16T02:42:13.634149+00:00",
+  "git_sha": "46caf7accf93137f99a83f01fcf23eb500c810ed",
+  "seed": 42,
+  "config": {
+    "threshold": 0.5,
+    "zscore_quantile": 0.65,
+    "min_history_for_quantile": 10,
+    "min_signal_abs": 0.0,
+    "edge_cost_multiplier": 0.0,
+    "residual_clip": 2.0,
+    "reject_if_residual_clipped": false,
+    "n_samples": 16,
+    "max_trades_per_day": 8,
+    "max_contracts": 20,
+    "max_notional": 50000.0,
+    "direction_mode": "mean_revert",
+    "signal_provider": "deep_flow",
+    "seed": 42,
+    "execution_mode": "touch",
+    "execution_impact_bps": 0.0,
+    "execution_fee_per_contract": 0.0,
+    "execution_worse_touch_extra_half_spread": 0.0,
+    "spread_gate_mode": "abs_or_rel",
+    "max_spread_abs": 8.0,
+    "max_spread_rel": 0.75,
+    "edge_signal_to_usd_scale": 2.0,
+    "unit_sanity_check": true,
+    "unit_sanity_fail_fast": false
+  },
+  "unit_sanity": {
+    "enabled": true,
+    "checked": true,
+    "median_edge_gross_usd": 453.8600852193948,
+    "median_expected_cost_usd": 716.6125720084794,
+    "median_edge_over_cost": 0.6333409473229622,
+    "edge_signal_to_usd_scale": 2.0
+  },
+  "target_mode": "delta_theta_raw",
+  "dataset_path": "data/processed/dataset.npz",
+  "checkpoint_path": "outputs/checkpoints/flow_latest.pt"
+}

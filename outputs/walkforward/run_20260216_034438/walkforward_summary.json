@@ -1,0 +1,555 @@
+{
+  "generated_at": "2026-02-16T03:45:13.913871+00:00",
+  "git_sha": "46caf7accf93137f99a83f01fcf23eb500c810ed",
+  "config": {
+    "paths": {
+      "raw_dir": "data/raw",
+      "processed_dir": "data/processed",
+      "underlying_path": "data/underlying/spy_eod.parquet",
+      "outputs_dir": "outputs"
+    },
+    "surface": {
+      "x_min": -0.3,
+      "x_max": 0.3,
+      "nx": 21,
+      "tenors_days": [
+        7,
+        14,
+        30,
+        60,
+        90,
+        180
+      ]
+    },
+    "repair": {
+      "lambda_smooth": 0.001,
+      "data_weight": 1.0
+    },
+    "train": {
+      "seed": 42,
+      "batch_size": 32,
+      "epochs": 60,
+      "lr": 0.0003,
+      "weight_decay": 1e-06,
+      "model_type": "deep_smoothing",
+      "hidden_size": 192,
+      "flow_layers": 10,
+      "flow_transform": "spline",
+      "flow_bins": 12,
+      "target_mode": "delta_theta_raw",
+      "pca_lag_components": 6,
+      "nll_weight": 0.15,
+      "aux_price_weight": 1.0,
+      "aux_iv_weight": 0.35,
+      "aux_iv_core_weight": 0.45,
+      "aux_mape_weight": 0.3,
+      "aux_samples_train": 16,
+      "aux_samples_eval": 64,
+      "early_stop_metric": "iv_rmse",
+      "early_stopping_patience": 10,
+      "iv_valid_margin": 0.0002,
+      "iv_core_x_abs_max": 0.12,
+      "iv_core_tenor_min_days": 14.0,
+      "iv_loss": "huber",
+      "iv_huber_delta": 0.03,
+      "min_vega_weight": 1e-06,
+      "ds_hidden_size": 256,
+      "ds_layers": 5,
+      "ds_dropout": 0.15,
+      "ds_corr_scale": 0.3,
+      "ds_prior_blend": 0.3,
+      "ds_num_experts": 4,
+      "ds_sigma_min": 0.002,
+      "ds_sigma_max": 0.06,
+      "ds_sample_temperature": 1.0,
+      "lambda_calendar": 6.0,
+      "lambda_butterfly": 3.0,
+      "lambda_asymptotic": 0.75
+    },
+    "strategy": {
+      "signal_provider": "deep_flow",
+      "run_all_providers": false,
+      "providers": [
+        "deep_flow",
+        "climatology",
+        "last_value",
+        "linear_context"
+      ],
+      "direction_mode": "mean_revert",
+      "threshold": 2.0,
+      "zscore_quantile": 0.8,
+      "min_history_for_quantile": 20,
+      "min_signal_abs": 0.0005,
+      "edge_cost_multiplier": 1.0,
+      "edge_signal_to_usd_scale": 1.5,
+      "residual_clip": 1.0,
+      "reject_if_residual_clipped": false,
+      "unit_sanity_check": true,
+      "unit_sanity_fail_fast": false,
+      "n_samples": 64,
+      "max_trades_per_day": 3,
+      "execution_mode": "mid_plus_half_spread",
+      "execution_impact_bps": 0.0,
+      "execution_fee_per_contract": 0.0,
+      "execution_worse_touch_extra_half_spread": 0.5,
+      "spread_gate_mode": "abs_or_rel",
+      "max_spread_abs": 4.0,
+      "max_spread_rel": 0.5,
+      "max_contracts": 10,
+      "max_notional": 25000,
+      "seed": 42,
+      "provider_overrides": {
+        "climatology": {
+          "threshold": 0.0,
+          "zscore_quantile": 0.75
+        },
+        "last_value": {
+          "threshold": 0.0,
+          "zscore_quantile": 0.75
+        },
+        "linear_context": {
+          "threshold": 0.0,
+          "zscore_quantile": 0.8
+        }
+      }
+    },
+    "walkforward": {
+      "train_days": 40,
+      "test_days": 10,
+      "step_days": 10
+    },
+    "tradier": {
+      "base_url": "https://api.tradier.com",
+      "token_env_var": "TRADIER_TOKEN",
+      "cache_enabled": true,
+      "cache_dir": "data/tradier_cache",
+      "connect_timeout": 10.0,
+      "read_timeout": 30.0,
+      "max_retries": 4,
+      "backoff_base": 0.5
+    },
+    "massive": {
+      "base_url": "https://api.massive.com",
+      "api_key_env_var": "MASSIVE_API_KEY",
+      "max_history_days": 730,
+      "cache_enabled": true,
+      "cache_dir": "data/massive_cache",
+      "connect_timeout": 10.0,
+      "read_timeout": 30.0,
+      "max_retries": 4,
+      "backoff_base": 0.5,
+      "fallback_rel_spread": 0.12,
+      "fallback_strike_band_pct": 0.25,
+      "fallback_max_contracts_per_expiry": 80,
+      "fallback_min_mid": 0.01
+    },
+    "massive_flatfiles": {
+      "endpoint_url": "https://files.massive.com",
+      "bucket": "flatfiles",
+      "prefix": "us_options_opra/day_aggs_v1",
+      "aws_access_key_id_env_var": "MASSIVE_FILES_ACCESS_KEY_ID",
+      "aws_secret_access_key_env_var": "MASSIVE_FILES_SECRET_ACCESS_KEY",
+      "cache_enabled": true,
+      "cache_dir": "data/massive_cache/flatfiles",
+      "read_chunksize": 250000,
+      "fallback_rel_spread": 0.08,
+      "fallback_min_mid": 0.01
+    },
+    "synth": {
+      "seed": 123,
+      "bad_quote_prob": 0.02,
+      "strike_points": 21
+    }
+  },
+  "walkforward": {
+    "train_days": 40,
+    "test_days": 10,
+    "step_days": 10
+  },
+  "aggregate": {
+    "windows": 21,
+    "mean_total_pnl": 0.0,
+    "mean_sharpe": 0.0,
+    "mean_turnover_ratio": 0.0
+  },
+  "windows": [
+    {
+      "window_id": 0,
+      "train_start": "2025-01-02",
+      "train_end": "2025-03-03",
+      "test_start": "2025-03-04",
+      "test_end": "2025-03-17",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_00/backtests/run_deep_flow_20260216_034441_180944",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 1,
+      "train_start": "2025-01-17",
+      "train_end": "2025-03-17",
+      "test_start": "2025-03-18",
+      "test_end": "2025-03-31",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_01/backtests/run_deep_flow_20260216_034443_001372",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 2,
+      "train_start": "2025-02-03",
+      "train_end": "2025-03-31",
+      "test_start": "2025-04-01",
+      "test_end": "2025-04-14",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_02/backtests/run_deep_flow_20260216_034444_739828",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 3,
+      "train_start": "2025-02-18",
+      "train_end": "2025-04-14",
+      "test_start": "2025-04-15",
+      "test_end": "2025-04-29",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_03/backtests/run_deep_flow_20260216_034445_187680",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 4,
+      "train_start": "2025-03-04",
+      "train_end": "2025-04-29",
+      "test_start": "2025-04-30",
+      "test_end": "2025-05-13",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_04/backtests/run_deep_flow_20260216_034446_980747",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 5,
+      "train_start": "2025-03-18",
+      "train_end": "2025-05-13",
+      "test_start": "2025-05-14",
+      "test_end": "2025-05-28",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_05/backtests/run_deep_flow_20260216_034448_127967",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 6,
+      "train_start": "2025-04-01",
+      "train_end": "2025-05-28",
+      "test_start": "2025-05-29",
+      "test_end": "2025-06-11",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_06/backtests/run_deep_flow_20260216_034449_464662",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 7,
+      "train_start": "2025-04-15",
+      "train_end": "2025-06-11",
+      "test_start": "2025-06-12",
+      "test_end": "2025-06-26",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_07/backtests/run_deep_flow_20260216_034451_238448",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 8,
+      "train_start": "2025-04-30",
+      "train_end": "2025-06-26",
+      "test_start": "2025-06-27",
+      "test_end": "2025-07-11",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_08/backtests/run_deep_flow_20260216_034452_962087",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 9,
+      "train_start": "2025-05-14",
+      "train_end": "2025-07-11",
+      "test_start": "2025-07-14",
+      "test_end": "2025-07-25",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_09/backtests/run_deep_flow_20260216_034454_780552",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 10,
+      "train_start": "2025-05-29",
+      "train_end": "2025-07-25",
+      "test_start": "2025-07-28",
+      "test_end": "2025-08-08",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_10/backtests/run_deep_flow_20260216_034456_469630",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 11,
+      "train_start": "2025-06-12",
+      "train_end": "2025-08-08",
+      "test_start": "2025-08-11",
+      "test_end": "2025-08-22",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_11/backtests/run_deep_flow_20260216_034458_274384",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 12,
+      "train_start": "2025-06-27",
+      "train_end": "2025-08-22",
+      "test_start": "2025-08-25",
+      "test_end": "2025-09-08",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_12/backtests/run_deep_flow_20260216_034500_085532",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 13,
+      "train_start": "2025-07-14",
+      "train_end": "2025-09-08",
+      "test_start": "2025-09-09",
+      "test_end": "2025-09-22",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_13/backtests/run_deep_flow_20260216_034501_920276",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 14,
+      "train_start": "2025-07-28",
+      "train_end": "2025-09-22",
+      "test_start": "2025-09-23",
+      "test_end": "2025-10-06",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_14/backtests/run_deep_flow_20260216_034503_533987",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 15,
+      "train_start": "2025-08-11",
+      "train_end": "2025-10-06",
+      "test_start": "2025-10-07",
+      "test_end": "2025-10-20",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_15/backtests/run_deep_flow_20260216_034505_335653",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 16,
+      "train_start": "2025-08-25",
+      "train_end": "2025-10-20",
+      "test_start": "2025-10-21",
+      "test_end": "2025-11-03",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_16/backtests/run_deep_flow_20260216_034507_151996",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 17,
+      "train_start": "2025-09-09",
+      "train_end": "2025-11-03",
+      "test_start": "2025-11-04",
+      "test_end": "2025-11-17",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_17/backtests/run_deep_flow_20260216_034508_970722",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 18,
+      "train_start": "2025-09-23",
+      "train_end": "2025-11-17",
+      "test_start": "2025-11-18",
+      "test_end": "2025-12-02",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_18/backtests/run_deep_flow_20260216_034510_703766",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 19,
+      "train_start": "2025-10-07",
+      "train_end": "2025-12-02",
+      "test_start": "2025-12-03",
+      "test_end": "2025-12-16",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_19/backtests/run_deep_flow_20260216_034512_355816",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    },
+    {
+      "window_id": 20,
+      "train_start": "2025-10-21",
+      "train_end": "2025-12-16",
+      "test_start": "2025-12-17",
+      "test_end": "2025-12-31",
+      "run_dir": "outputs/walkforward/run_20260216_034438/window_20/backtests/run_deep_flow_20260216_034513_889983",
+      "summary": {
+        "provider": "deep_flow",
+        "n_days": 9,
+        "trade_days": 0,
+        "sum_trades": 0,
+        "total_pnl": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "turnover_ratio": 0.0
+      }
+    }
+  ]
+}

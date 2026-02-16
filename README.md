@@ -10,7 +10,9 @@ Arbitrage-free deep generative modeling of SPY option surfaces (EOD) plus a simp
 - Builds normalized call surfaces on a fixed log-moneyness/tenor grid.
 - Runs static-arbitrage checks and repairs surfaces with a convex QP (`cvxpy` + `OSQP`).
 - Converts repaired surfaces into nonnegative increment-curve parameters.
-- Trains a conditional normalizing flow (`PyTorch` + `nflows`) for `p(theta | context)`.
+- Trains either:
+  - a conditional normalizing flow (`PyTorch` + `nflows`) for `p(theta | context)`, or
+  - a hybrid deep-smoothing model (prior + regime-aware mixture-of-experts + heteroskedastic uncertainty).
 - Backtests a simple EOD dislocation strategy using bid/ask-aware one-day holding rules.
 
 ## Tradier Data Notes
@@ -81,6 +83,8 @@ python -m spygen backtest --checkpoint outputs/checkpoints/flow_latest.pt
 python -m spygen walkforward --config configs/default.yaml
 python -m spygen sanity
 ```
+
+`configs/default.yaml` includes `data_guard.require_years: [2025]`, so train/eval/backtest/walkforward will fail fast if `data/processed/dataset.npz` is not built from 2025 dates.
 
 Collect Tradier live chains directly into `data/raw/YYYY-MM-DD.parquet` (same format used by dataset build/backtest):
 ```bash

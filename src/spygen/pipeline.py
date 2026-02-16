@@ -196,6 +196,44 @@ def _massive_cutoff_date(config: dict[str, Any], today: date | None = None) -> d
     return base - timedelta(days=max(1, max_history_days))
 
 
+def _dataset_date_info(dataset_path: str | Path) -> dict[str, Any]:
+    ds = np.load(dataset_path, allow_pickle=True)
+    if "dates" not in ds.files:
+        return {
+            "rows": 0,
+            "date_min": None,
+            "date_max": None,
+            "years": [],
+            "year_counts": {},
+        }
+    dates = [str(x) for x in ds["dates"]]
+    years = sorted({d[:4] for d in dates})
+    year_counts = {year: int(sum(1 for d in dates if d.startswith(year))) for year in years}
+    return {
+        "rows": int(len(dates)),
+        "date_min": min(dates) if dates else None,
+        "date_max": max(dates) if dates else None,
+        "years": years,
+        "year_counts": year_counts,
+    }
+
+
+def _enforce_dataset_year_guard(dataset_path: str | Path, config: dict[str, Any]) -> None:
+    guard = config.get("data_guard", {})
+    required = guard.get("require_years")
+    if not required:
+        return
+    required_years = {str(y) for y in required}
+    info = _dataset_date_info(dataset_path)
+    present = set(info["years"])
+    if not required_years.issubset(present):
+        raise ValueError(
+            "Dataset year guard failed. "
+            f"required_years={sorted(required_years)} present_years={sorted(present)} "
+            f"range={info['date_min']}..{info['date_max']}"
+        )
+
+
 def _clip_massive_date_range(
     start_d: date,
     end_d: date,
@@ -1126,6 +1164,12 @@ def build_dataset_range(start: str, end: str, config: dict[str, Any]) -> Path:
     meta = {
         "rows": len(dates),
         "attempted_days": len(files),
+        "date_min": min(dates),
+        "date_max": max(dates),
+        "year_counts": {
+            year: int(sum(1 for d in dates if str(d).startswith(year)))
+            for year in sorted({str(d)[:4] for d in dates})
+        },
         "context_features": context_feature_names,
         "nx": grid.nx,
         "nt": len(grid.tenors_days),
@@ -1146,6 +1190,7 @@ def train_from_config(config: dict[str, Any], dataset_path: str | Path | None = 
     train_cfg = config.get("train", {})
     processed_dir = Path(config["paths"]["processed_dir"])
     ds_path = Path(dataset_path) if dataset_path else processed_dir / "dataset.npz"
+    _enforce_dataset_year_guard(ds_path, config)
 
     out_dir = ensure_dir(Path(config["paths"]["outputs_dir"]) / "checkpoints")
     grid = SurfaceGrid.from_config(config["surface"])
@@ -1158,17 +1203,39 @@ def train_from_config(config: dict[str, Any], dataset_path: str | Path | None = 
             epochs=int(train_cfg.get("epochs", 20)),
             lr=float(train_cfg.get("lr", 1e-3)),
             weight_decay=float(train_cfg.get("weight_decay", 1e-6)),
+            model_type=str(train_cfg.get("model_type", "deep_smoothing")),
             hidden_size=int(train_cfg.get("hidden_size", 128)),
             flow_layers=int(train_cfg.get("flow_layers", 4)),
             early_stopping_patience=int(train_cfg.get("early_stopping_patience", 5)),
             target_mode=str(train_cfg.get("target_mode", "delta_theta_raw")),
             flow_transform=str(train_cfg.get("flow_transform", "spline")),
             flow_bins=int(train_cfg.get("flow_bins", 8)),
+            nll_weight=float(train_cfg.get("nll_weight", 0.25)),
             aux_price_weight=float(train_cfg.get("aux_price_weight", 1.0)),
             aux_iv_weight=float(train_cfg.get("aux_iv_weight", 0.1)),
+            aux_iv_core_weight=float(train_cfg.get("aux_iv_core_weight", 0.15)),
+            aux_mape_weight=float(train_cfg.get("aux_mape_weight", 0.25)),
             aux_samples_train=int(train_cfg.get("aux_samples_train", 8)),
             aux_samples_eval=int(train_cfg.get("aux_samples_eval", 32)),
             early_stop_metric=str(train_cfg.get("early_stop_metric", "iv_rmse")),
+            iv_valid_margin=float(train_cfg.get("iv_valid_margin", 1e-4)),
+            iv_core_x_abs_max=float(train_cfg.get("iv_core_x_abs_max", 0.15)),
+            iv_core_tenor_min_days=float(train_cfg.get("iv_core_tenor_min_days", 30.0)),
+            iv_loss=str(train_cfg.get("iv_loss", "mse")),
+            iv_huber_delta=float(train_cfg.get("iv_huber_delta", 0.05)),
+            min_vega_weight=float(train_cfg.get("min_vega_weight", 1e-6)),
+            ds_hidden_size=int(train_cfg.get("ds_hidden_size", 128)),
+            ds_layers=int(train_cfg.get("ds_layers", 3)),
+            ds_dropout=float(train_cfg.get("ds_dropout", 0.1)),
+            ds_corr_scale=float(train_cfg.get("ds_corr_scale", 0.35)),
+            ds_prior_blend=float(train_cfg.get("ds_prior_blend", 0.2)),
+            ds_num_experts=int(train_cfg.get("ds_num_experts", 3)),
+            ds_sigma_min=float(train_cfg.get("ds_sigma_min", 0.003)),
+            ds_sigma_max=float(train_cfg.get("ds_sigma_max", 0.08)),
+            ds_sample_temperature=float(train_cfg.get("ds_sample_temperature", 1.0)),
+            lambda_calendar=float(train_cfg.get("lambda_calendar", 5.0)),
+            lambda_butterfly=float(train_cfg.get("lambda_butterfly", 2.0)),
+            lambda_asymptotic=float(train_cfg.get("lambda_asymptotic", 0.5)),
         ),
         nx=grid.nx,
         nt=len(grid.tenors_days),
@@ -1184,6 +1251,7 @@ def eval_checkpoint(
 ) -> Path:
     processed_dir = Path(config["paths"]["processed_dir"])
     ds_path = Path(dataset_path) if dataset_path else processed_dir / "dataset.npz"
+    _enforce_dataset_year_guard(ds_path, config)
     ds = np.load(ds_path, allow_pickle=True)
     ds_keys = set(ds.files)
 
@@ -1209,7 +1277,12 @@ def eval_checkpoint(
         base_theta_raw = None
     model = load_checkpoint(checkpoint_path)
 
-    ll = log_likelihood(model, theta_raw=theta_raw_target, context=context)
+    ll = log_likelihood(
+        model,
+        theta_raw=theta_raw_target,
+        context=context,
+        base_theta_raw=base_theta_raw,
+    )
     sample_base = base_theta_raw[:1] if base_theta_raw is not None else None
     samples = sample_surfaces(
         model,
@@ -1238,6 +1311,18 @@ def eval_checkpoint(
         [_surface_to_iv(s, x_grid=x_grid, tenors_days=tenors_days) for s in mean_surfaces]
     )
     iv_diff = iv_obs - iv_pred
+    x_abs = np.abs(x_grid)
+    tenor_mask = tenors_days >= 30
+    x_mask = x_abs <= 0.15
+    core_diff = iv_diff[:, x_mask, :][:, :, tenor_mask]
+    core_rmse = float(np.sqrt(np.mean(core_diff**2))) if core_diff.size else float("nan")
+    core_mae = float(np.mean(np.abs(core_diff))) if core_diff.size else float("nan")
+    w_x = np.exp(-x_abs / 0.2).reshape(1, -1, 1)
+    w_t = np.sqrt(np.maximum(tenors_days.astype(float), 1.0) / 365.0).reshape(1, 1, -1)
+    iv_weights = w_x * w_t
+    iv_weights = iv_weights / max(float(iv_weights.mean()), 1e-8)
+    weighted_iv_rmse = float(np.sqrt(np.mean((iv_diff**2) * iv_weights)))
+    weighted_iv_mae = float(np.mean(np.abs(iv_diff) * iv_weights))
 
     run_name = f"eval_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
     out_dir = ensure_dir(Path(config["paths"]["outputs_dir"]) / run_name)
@@ -1254,6 +1339,10 @@ def eval_checkpoint(
         },
         "iv_rmse": float(np.sqrt(np.mean(iv_diff**2))),
         "iv_mae": float(np.mean(np.abs(iv_diff))),
+        "iv_rmse_core_x15_t30": core_rmse,
+        "iv_mae_core_x15_t30": core_mae,
+        "iv_rmse_weighted": weighted_iv_rmse,
+        "iv_mae_weighted": weighted_iv_mae,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
@@ -1271,6 +1360,7 @@ def backtest_from_config(
 ) -> Path:
     processed_dir = Path(config["paths"]["processed_dir"])
     ds_path = Path(dataset_path) if dataset_path else processed_dir / "dataset.npz"
+    _enforce_dataset_year_guard(ds_path, config)
 
     bt_cfg = dict(config.get("strategy", {}))
     grid = SurfaceGrid.from_config(config["surface"])
@@ -1334,13 +1424,18 @@ def backtest_from_config(
     return compare_dir
 
 
-def _subset_dataset(ds: dict[str, np.ndarray], idx: np.ndarray) -> dict[str, np.ndarray]:
+def _subset_dataset(
+    ds: dict[str, np.ndarray],
+    idx: np.ndarray,
+    n_rows: int,
+) -> dict[str, np.ndarray]:
     payload: dict[str, np.ndarray] = {}
     for key, value in ds.items():
-        if key in {"x_grid", "tenors_days"}:
-            payload[key] = value
-        else:
+        # Slice only row-aligned arrays. Keep metadata/static arrays unchanged.
+        if value.ndim > 0 and int(value.shape[0]) == n_rows:
             payload[key] = value[idx]
+        else:
+            payload[key] = value
     return payload
 
 
@@ -1357,6 +1452,7 @@ def walkforward_from_config(config: dict[str, Any], dataset_path: str | Path | N
 
     processed_dir = Path(config["paths"]["processed_dir"])
     ds_path = Path(dataset_path) if dataset_path else processed_dir / "dataset.npz"
+    _enforce_dataset_year_guard(ds_path, config)
     ds_raw = np.load(ds_path, allow_pickle=True)
     ds = {k: ds_raw[k] for k in ds_raw.files}
     n = int(ds["dates"].shape[0])
@@ -1387,8 +1483,8 @@ def walkforward_from_config(config: dict[str, Any], dataset_path: str | Path | N
         train_idx = np.arange(start, start + train_days)
         test_idx = np.arange(start + train_days, start + train_days + test_days)
         window_dir = ensure_dir(root / f"window_{window_id:02d}")
-        train_ds = _subset_dataset(ds, train_idx)
-        test_ds = _subset_dataset(ds, test_idx)
+        train_ds = _subset_dataset(ds, train_idx, n_rows=n)
+        test_ds = _subset_dataset(ds, test_idx, n_rows=n)
         train_ds_path = window_dir / "train_dataset.npz"
         test_ds_path = window_dir / "test_dataset.npz"
         _write_dataset_npz(train_ds_path, train_ds)
@@ -1403,17 +1499,39 @@ def walkforward_from_config(config: dict[str, Any], dataset_path: str | Path | N
                 epochs=int(train_cfg.get("epochs", 20)),
                 lr=float(train_cfg.get("lr", 1e-3)),
                 weight_decay=float(train_cfg.get("weight_decay", 1e-6)),
+                model_type=str(train_cfg.get("model_type", "deep_smoothing")),
                 hidden_size=int(train_cfg.get("hidden_size", 128)),
                 flow_layers=int(train_cfg.get("flow_layers", 4)),
                 early_stopping_patience=int(train_cfg.get("early_stopping_patience", 5)),
                 target_mode=str(train_cfg.get("target_mode", "delta_theta_raw")),
                 flow_transform=str(train_cfg.get("flow_transform", "spline")),
                 flow_bins=int(train_cfg.get("flow_bins", 8)),
+                nll_weight=float(train_cfg.get("nll_weight", 0.25)),
                 aux_price_weight=float(train_cfg.get("aux_price_weight", 1.0)),
                 aux_iv_weight=float(train_cfg.get("aux_iv_weight", 0.1)),
+                aux_iv_core_weight=float(train_cfg.get("aux_iv_core_weight", 0.15)),
+                aux_mape_weight=float(train_cfg.get("aux_mape_weight", 0.25)),
                 aux_samples_train=int(train_cfg.get("aux_samples_train", 8)),
                 aux_samples_eval=int(train_cfg.get("aux_samples_eval", 32)),
                 early_stop_metric=str(train_cfg.get("early_stop_metric", "iv_rmse")),
+                iv_valid_margin=float(train_cfg.get("iv_valid_margin", 1e-4)),
+                iv_core_x_abs_max=float(train_cfg.get("iv_core_x_abs_max", 0.15)),
+                iv_core_tenor_min_days=float(train_cfg.get("iv_core_tenor_min_days", 30.0)),
+                iv_loss=str(train_cfg.get("iv_loss", "mse")),
+                iv_huber_delta=float(train_cfg.get("iv_huber_delta", 0.05)),
+                min_vega_weight=float(train_cfg.get("min_vega_weight", 1e-6)),
+                ds_hidden_size=int(train_cfg.get("ds_hidden_size", 128)),
+                ds_layers=int(train_cfg.get("ds_layers", 3)),
+                ds_dropout=float(train_cfg.get("ds_dropout", 0.1)),
+                ds_corr_scale=float(train_cfg.get("ds_corr_scale", 0.35)),
+                ds_prior_blend=float(train_cfg.get("ds_prior_blend", 0.2)),
+                ds_num_experts=int(train_cfg.get("ds_num_experts", 3)),
+                ds_sigma_min=float(train_cfg.get("ds_sigma_min", 0.003)),
+                ds_sigma_max=float(train_cfg.get("ds_sigma_max", 0.08)),
+                ds_sample_temperature=float(train_cfg.get("ds_sample_temperature", 1.0)),
+                lambda_calendar=float(train_cfg.get("lambda_calendar", 5.0)),
+                lambda_butterfly=float(train_cfg.get("lambda_butterfly", 2.0)),
+                lambda_asymptotic=float(train_cfg.get("lambda_asymptotic", 0.5)),
             ),
             nx=grid.nx,
             nt=len(grid.tenors_days),
@@ -1467,6 +1585,7 @@ def walkforward_from_config(config: dict[str, Any], dataset_path: str | Path | N
 
 def run_sanity(config: dict[str, Any]) -> dict[str, Path]:
     cfg = dict(config)
+    cfg["data_guard"] = {}
     cfg["train"] = dict(config.get("train", {}))
     cfg["train"]["epochs"] = min(4, int(cfg["train"].get("epochs", 20)))
     cfg["train"]["flow_layers"] = min(2, int(cfg["train"].get("flow_layers", 4)))

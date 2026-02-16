@@ -1,0 +1,14 @@
+{
+  "n_obs": 64,
+  "target_mode": "delta_theta_raw",
+  "mean_log_likelihood": -38.848812103271484,
+  "median_log_likelihood": 8.82421875,
+  "sample_arb_pass_rate": 1.0,
+  "sample_violations_avg": {
+    "strike_monotonic": 0.0,
+    "strike_convex": 0.0,
+    "calendar": 0.0
+  },
+  "iv_rmse": 1.221657002410308,
+  "iv_mae": 0.7054617662650725
+}

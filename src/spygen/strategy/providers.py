@@ -92,7 +92,14 @@ class DeepFlowSignalProvider(SignalProvider):
             else None
         )
         with torch.no_grad():
-            log_prob = model.log_prob(y, context=x).cpu().numpy()
+            if base is not None and bool(getattr(model, "supports_base_in_log_prob", False)):
+                log_prob = model.log_prob(
+                    y,
+                    context=x,
+                    base_theta_raw=base,
+                ).cpu().numpy()
+            else:
+                log_prob = model.log_prob(y, context=x).cpu().numpy()
             mean_surfaces = model.conditional_mean_surface(
                 x,
                 num_samples=self.n_samples,

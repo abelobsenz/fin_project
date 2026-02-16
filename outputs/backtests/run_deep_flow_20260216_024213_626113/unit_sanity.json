@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "checked": true,
+  "median_edge_gross_usd": 453.8600852193948,
+  "median_expected_cost_usd": 716.6125720084794,
+  "median_edge_over_cost": 0.6333409473229622,
+  "edge_signal_to_usd_scale": 2.0
+}

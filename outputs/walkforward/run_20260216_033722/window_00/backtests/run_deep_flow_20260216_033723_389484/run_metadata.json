@@ -1,0 +1,38 @@
+{
+  "generated_at": "2026-02-16T03:37:23.393104+00:00",
+  "git_sha": "46caf7accf93137f99a83f01fcf23eb500c810ed",
+  "seed": 42,
+  "config": {
+    "threshold": 1.5,
+    "zscore_quantile": 0.8,
+    "min_history_for_quantile": 15,
+    "min_signal_abs": 0.0005,
+    "edge_cost_multiplier": 0.75,
+    "residual_clip": 1.0,
+    "reject_if_residual_clipped": false,
+    "n_samples": 8,
+    "max_trades_per_day": 3,
+    "max_contracts": 10,
+    "max_notional": 25000.0,
+    "direction_mode": "mean_revert",
+    "signal_provider": "deep_flow",
+    "seed": 42,
+    "execution_mode": "mid_plus_half_spread",
+    "execution_impact_bps": 0.0,
+    "execution_fee_per_contract": 0.0,
+    "execution_worse_touch_extra_half_spread": 0.5,
+    "spread_gate_mode": "abs_or_rel",
+    "max_spread_abs": 4.0,
+    "max_spread_rel": 0.5,
+    "edge_signal_to_usd_scale": 1.5,
+    "unit_sanity_check": true,
+    "unit_sanity_fail_fast": false
+  },
+  "unit_sanity": {
+    "enabled": true,
+    "checked": false
+  },
+  "target_mode": "delta_theta_raw",
+  "dataset_path": "outputs/walkforward/run_20260216_033722/window_00/test_dataset.npz",
+  "checkpoint_path": "outputs/walkforward/run_20260216_033722/window_00/checkpoints/flow_latest.pt"
+}

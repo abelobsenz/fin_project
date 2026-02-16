@@ -30,14 +30,23 @@ def _read_json(path: Path) -> dict | None:
 
 
 @st.cache_data(show_spinner=False)
-def _load_dataset(path: str) -> dict[str, np.ndarray]:
+def _load_dataset(path: str, cache_key: str) -> dict[str, np.ndarray]:
+    _ = cache_key
     data = np.load(path, allow_pickle=True)
     return {k: data[k] for k in data.files}
 
 
 @st.cache_resource(show_spinner=False)
-def _load_model(path: str):
+def _load_model(path: str, cache_key: str):
+    _ = cache_key
     return load_checkpoint(path)
+
+
+def _file_cache_key(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    stat = path.stat()
+    return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
 
 
 def _surface_fig(
@@ -254,6 +263,10 @@ def main() -> None:
             st.text_input("Checkpoint (.pt)", value=str(DEFAULT_CHECKPOINT))
         )
         n_samples = st.slider("Samples for conditional mean", min_value=8, max_value=256, value=64)
+        if st.button("Reload dataset/model from disk", use_container_width=True):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.rerun()
 
     if not dataset_path.exists():
         st.error(f"Dataset not found: {dataset_path}")
@@ -262,7 +275,9 @@ def main() -> None:
         st.error(f"Checkpoint not found: {checkpoint_path}")
         return
 
-    dataset = _load_dataset(str(dataset_path))
+    dataset_key = _file_cache_key(dataset_path)
+    checkpoint_key = _file_cache_key(checkpoint_path)
+    dataset = _load_dataset(str(dataset_path), dataset_key)
     required = {"dates", "context", "surface", "x_grid", "tenors_days"}
     missing = required.difference(dataset.keys())
     if missing:
@@ -292,9 +307,13 @@ def main() -> None:
 
     idx = st.slider("Date index", min_value=0, max_value=len(dates) - 1, value=len(dates) - 1)
     date_label = str(dates[idx])
+    st.caption(
+        f"Loaded dataset: {dataset_path} | rows={len(dates)} | "
+        f"range={dates[0]} to {dates[-1]}"
+    )
 
     with st.spinner("Loading model and computing diagnostics..."):
-        model = _load_model(str(checkpoint_path))
+        model = _load_model(str(checkpoint_path), checkpoint_key)
         ctx = torch.as_tensor(contexts[idx : idx + 1], dtype=torch.float32)
         trg = torch.as_tensor(theta_raw_target[idx : idx + 1], dtype=torch.float32)
         base = (
@@ -304,7 +323,10 @@ def main() -> None:
         )
 
         with torch.no_grad():
-            log_prob = float(model.log_prob(trg, context=ctx).item())
+            if base is not None and bool(getattr(model, "supports_base_in_log_prob", False)):
+                log_prob = float(model.log_prob(trg, context=ctx, base_theta_raw=base).item())
+            else:
+                log_prob = float(model.log_prob(trg, context=ctx).item())
             mean_surface = model.conditional_mean_surface(
                 ctx,
                 num_samples=n_samples,

@@ -1,0 +1,35 @@
+{
+  "global": {
+    "rejected_quantile_gate": 218,
+    "rejected_net_edge": 77,
+    "rejected_signal_below_min": 15,
+    "accepted": 1
+  },
+  "by_structure": {
+    "rr": {
+      "rejected_quantile_gate": 218,
+      "rejected_net_edge": 28,
+      "accepted": 1,
+      "rejected_signal_below_min": 2
+    },
+    "fly": {
+      "rejected_quantile_gate": 218,
+      "rejected_net_edge": 26,
+      "rejected_signal_below_min": 5
+    },
+    "calendar": {
+      "rejected_quantile_gate": 218,
+      "rejected_signal_below_min": 8,
+      "rejected_net_edge": 23
+    }
+  },
+  "meta": {
+    "attempted_structure_checks": 93,
+    "provider": "deep_flow",
+    "units": {
+      "edge": "USD (proxy)",
+      "cost": "USD",
+      "signal": "normalized_call_surface_residual"
+    }
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "n_trades": 18,
+  "cost_breakdown": {
+    "spread_paid": 11621.359999999999,
+    "fill_slippage": 0.0,
+    "fees": 0.0
+  },
+  "edge": {
+    "mean_edge_gross_usd": 824.9703008758495,
+    "median_edge_gross_usd": 647.8457298256312,
+    "mean_edge_net_usd": 179.3391897647385,
+    "median_edge_net_usd": 31.52298571619332
+  },
+  "hit_rate": 0.1111111111111111,
+  "avg_hold_days": 1.0,
+  "tail_losses": {
+    "p1": -4072.8076,
+    "p5": -3436.518,
+    "p10": -2670.555999999999
+  },
+  "per_structure": {
+    "calendar": {
+      "trades": 1,
+      "total_pnl": -326.16000000000014,
+      "mean_pnl": -326.16000000000014,
+      "median_pnl": -326.16000000000014,
+      "hit_rate": 0.0,
+      "spread_paid": 198.16000000000008,
+      "fill_slippage": 0.0,
+      "fees": 0.0,
+      "edge_gross_usd": 220.74463783287092,
+      "edge_net_usd": 22.58463783287084,
+      "delta_proxy": 0.0,
+      "vega_proxy": 5.722136009285803,
+      "gamma_proxy": -2.6990182521539197
+    },
+    "rr": {
+      "trades": 17,
+      "total_pnl": -19098.2,
+      "mean_pnl": -1123.4235294117648,
+      "median_pnl": -958.4400000000012,
+      "hit_rate": 0.11764705882352941,
+      "spread_paid": 11423.199999999999,
+      "fill_slippage": 0.0,
+      "fees": 0.0,
+      "edge_gross_usd": 14628.72077793242,
+      "edge_net_usd": 3205.5207779324223,
+      "delta_proxy": -0.002397271623112318,
+      "vega_proxy": 414.5799305986218,
+      "gamma_proxy": 0.05391174279266542
+    }
+  },
+  "exposure_proxy_totals": {
+    "delta_proxy": -0.002397271623112318,
+    "vega_proxy": 420.3020666079076,
+    "gamma_proxy": -2.6451065093612542
+  }
+}
