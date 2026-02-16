@@ -21,7 +21,16 @@ train:
   lr: 0.001
   weight_decay: 0.000001
   hidden_size: 128
-  flow_layers: 4
+  flow_layers: 5
+  flow_transform: spline
+  flow_bins: 8
+  target_mode: delta_theta_raw
+  pca_lag_components: 4
+  aux_price_weight: 1.0
+  aux_iv_weight: 0.1
+  aux_samples_train: 8
+  aux_samples_eval: 32
+  early_stop_metric: iv_rmse
   early_stopping_patience: 5
 
 strategy:

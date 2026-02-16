@@ -36,6 +36,8 @@ class SignalProvider(ABC):
         context: np.ndarray,
         theta_raw: np.ndarray,
         model: ConditionalSurfaceFlow | None,
+        theta_base_raw: np.ndarray | None = None,
+        target_mode: str = "theta_raw",
     ) -> None:
         ...
 
@@ -77,16 +79,24 @@ class DeepFlowSignalProvider(SignalProvider):
         context: np.ndarray,
         theta_raw: np.ndarray,
         model: ConditionalSurfaceFlow | None,
+        theta_base_raw: np.ndarray | None = None,
+        target_mode: str = "theta_raw",
     ) -> None:
         if model is None:
             raise ValueError("DeepFlowSignalProvider requires a trained model")
         x = torch.as_tensor(context, dtype=torch.float32)
         y = torch.as_tensor(theta_raw, dtype=torch.float32)
+        base = (
+            torch.as_tensor(theta_base_raw, dtype=torch.float32)
+            if theta_base_raw is not None and target_mode == "delta_theta_raw"
+            else None
+        )
         with torch.no_grad():
             log_prob = model.log_prob(y, context=x).cpu().numpy()
             mean_surfaces = model.conditional_mean_surface(
                 x,
                 num_samples=self.n_samples,
+                base_theta_raw=base,
             ).cpu().numpy()
         self._surfaces = surfaces
         self._mean_surfaces = mean_surfaces
@@ -116,7 +126,10 @@ class ClimatologySignalProvider(SignalProvider):
         context: np.ndarray,
         theta_raw: np.ndarray,
         model: ConditionalSurfaceFlow | None,
+        theta_base_raw: np.ndarray | None = None,
+        target_mode: str = "theta_raw",
     ) -> None:
+        _ = (context, theta_raw, model, theta_base_raw, target_mode)
         self._surfaces = surfaces
 
     def signal_for_day(self, idx: int) -> SignalOutput:
@@ -145,7 +158,10 @@ class LastValueSignalProvider(SignalProvider):
         context: np.ndarray,
         theta_raw: np.ndarray,
         model: ConditionalSurfaceFlow | None,
+        theta_base_raw: np.ndarray | None = None,
+        target_mode: str = "theta_raw",
     ) -> None:
+        _ = (context, theta_raw, model, theta_base_raw, target_mode)
         self._surfaces = surfaces
 
     def signal_for_day(self, idx: int) -> SignalOutput:
@@ -180,7 +196,10 @@ class LinearContextSignalProvider(SignalProvider):
         context: np.ndarray,
         theta_raw: np.ndarray,
         model: ConditionalSurfaceFlow | None,
+        theta_base_raw: np.ndarray | None = None,
+        target_mode: str = "theta_raw",
     ) -> None:
+        _ = (theta_raw, model, theta_base_raw, target_mode)
         self._surfaces = surfaces
         self._context = context
 

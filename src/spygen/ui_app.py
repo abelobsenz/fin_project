@@ -263,7 +263,7 @@ def main() -> None:
         return
 
     dataset = _load_dataset(str(dataset_path))
-    required = {"dates", "context", "theta_raw", "surface", "x_grid", "tenors_days"}
+    required = {"dates", "context", "surface", "x_grid", "tenors_days"}
     missing = required.difference(dataset.keys())
     if missing:
         st.error(f"Dataset missing keys: {sorted(missing)}")
@@ -272,7 +272,21 @@ def main() -> None:
     dates = dataset["dates"]
     surfaces = dataset["surface"]
     contexts = dataset["context"]
-    theta_raw = dataset["theta_raw"]
+    theta_raw_target = (
+        dataset["theta_target_raw"] if "theta_target_raw" in dataset else dataset["theta_raw"]
+    )
+    theta_raw_level = (
+        dataset["theta_raw_level"] if "theta_raw_level" in dataset else dataset["theta_raw"]
+    )
+    mode_arr = dataset["target_mode"] if "target_mode" in dataset else None
+    target_mode = str(mode_arr.reshape(-1)[0]) if mode_arr is not None else "theta_raw"
+    if target_mode == "delta_theta_raw":
+        if "theta_raw_prev" in dataset:
+            theta_base_raw = dataset["theta_raw_prev"]
+        else:
+            theta_base_raw = np.vstack([theta_raw_level[0], theta_raw_level[:-1]])
+    else:
+        theta_base_raw = None
     x_grid = dataset["x_grid"]
     tenors_days = dataset["tenors_days"]
 
@@ -282,15 +296,24 @@ def main() -> None:
     with st.spinner("Loading model and computing diagnostics..."):
         model = _load_model(str(checkpoint_path))
         ctx = torch.as_tensor(contexts[idx : idx + 1], dtype=torch.float32)
-        trg = torch.as_tensor(theta_raw[idx : idx + 1], dtype=torch.float32)
+        trg = torch.as_tensor(theta_raw_target[idx : idx + 1], dtype=torch.float32)
+        base = (
+            torch.as_tensor(theta_base_raw[idx : idx + 1], dtype=torch.float32)
+            if theta_base_raw is not None
+            else None
+        )
 
         with torch.no_grad():
             log_prob = float(model.log_prob(trg, context=ctx).item())
             mean_surface = model.conditional_mean_surface(
-                ctx, num_samples=n_samples
+                ctx,
+                num_samples=n_samples,
+                base_theta_raw=base,
             ).cpu().numpy()[0]
             sample_surfaces = model.sample_surfaces(
-                context=ctx, num_samples=min(n_samples, 64)
+                context=ctx,
+                num_samples=min(n_samples, 64),
+                base_theta_raw=base,
             ).cpu().numpy()[0]
 
     observed = np.asarray(surfaces[idx], dtype=float)
@@ -310,6 +333,7 @@ def main() -> None:
     c2.metric("Log-likelihood", f"{log_prob:,.2f}")
     c3.metric("Dislocation z", f"{dislocation:,.2f}")
     c4.metric("Sample arb pass", f"{100*sample_arb_pass:.1f}%")
+    st.caption(f"Model target mode: `{target_mode}`")
 
     c5, c6 = st.columns(2)
     with c5:

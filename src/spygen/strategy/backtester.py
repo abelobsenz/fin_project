@@ -224,9 +224,29 @@ def run_backtest(
     torch.manual_seed(config.seed)
 
     ds = np.load(dataset_path, allow_pickle=True)
+    ds_keys = set(ds.files)
     dates = ds["dates"].astype(str)
     context = ds["context"].astype(np.float32)
-    theta_raw = ds["theta_raw"].astype(np.float32)
+    theta_raw_target = (
+        ds["theta_target_raw"].astype(np.float32)
+        if "theta_target_raw" in ds_keys
+        else ds["theta_raw"].astype(np.float32)
+    )
+    theta_raw_level = (
+        ds["theta_raw_level"].astype(np.float32)
+        if "theta_raw_level" in ds_keys
+        else ds["theta_raw"].astype(np.float32)
+    )
+    mode_arr = ds["target_mode"] if "target_mode" in ds_keys else None
+    target_mode = str(mode_arr.reshape(-1)[0]) if mode_arr is not None else "theta_raw"
+    if target_mode == "delta_theta_raw":
+        theta_base_raw = (
+            ds["theta_raw_prev"].astype(np.float32)
+            if "theta_raw_prev" in ds_keys
+            else np.vstack([theta_raw_level[0], theta_raw_level[:-1]]).astype(np.float32)
+        )
+    else:
+        theta_base_raw = None
     surfaces = ds["surface"].astype(np.float32)
 
     provider_name = signal_provider_name or config.signal_provider
@@ -243,8 +263,10 @@ def run_backtest(
     provider.prepare(
         surfaces=surfaces,
         context=context,
-        theta_raw=theta_raw,
+        theta_raw=theta_raw_target,
         model=model,
+        theta_base_raw=theta_base_raw,
+        target_mode=target_mode,
     )
 
     exec_model = ExecutionModel(
@@ -568,6 +590,7 @@ def run_backtest(
         "seed": config.seed,
         "config": asdict(config),
         "unit_sanity": unit_sanity,
+        "target_mode": target_mode,
         "dataset_path": str(dataset_path),
         "checkpoint_path": str(checkpoint_path),
     }

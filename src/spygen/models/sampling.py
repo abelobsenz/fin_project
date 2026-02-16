@@ -17,6 +17,9 @@ def load_checkpoint(path: str | Path) -> ConditionalSurfaceFlow:
         nt=int(payload["nt"]),
         hidden_features=int(payload.get("train_config", {}).get("hidden_size", 128)),
         num_layers=int(payload.get("train_config", {}).get("flow_layers", 4)),
+        transform_type=str(payload.get("train_config", {}).get("flow_transform", "spline")),
+        num_bins=int(payload.get("train_config", {}).get("flow_bins", 8)),
+        target_mode=str(payload.get("target_mode", "theta_raw")),
     )
     model.load_state_dict(payload["model_state"], strict=False)
     if {
@@ -58,10 +61,16 @@ def sample_surfaces(
     model: ConditionalSurfaceFlow,
     context: np.ndarray,
     n_samples: int = 64,
+    base_theta_raw: np.ndarray | None = None,
 ) -> np.ndarray:
     with torch.no_grad():
         x = torch.as_tensor(context, dtype=torch.float32)
-        surfaces = model.sample_surfaces(context=x, num_samples=n_samples)
+        base = (
+            torch.as_tensor(base_theta_raw, dtype=torch.float32)
+            if base_theta_raw is not None
+            else None
+        )
+        surfaces = model.sample_surfaces(context=x, num_samples=n_samples, base_theta_raw=base)
     return surfaces.cpu().numpy()
 
 
@@ -69,6 +78,12 @@ def conditional_mean_surface(
     model: ConditionalSurfaceFlow,
     context: np.ndarray,
     n_samples: int = 64,
+    base_theta_raw: np.ndarray | None = None,
 ) -> np.ndarray:
-    samples = sample_surfaces(model, context=context, n_samples=n_samples)
+    samples = sample_surfaces(
+        model,
+        context=context,
+        n_samples=n_samples,
+        base_theta_raw=base_theta_raw,
+    )
     return samples.mean(axis=1)

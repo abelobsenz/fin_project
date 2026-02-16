@@ -5,7 +5,10 @@ import torch
 import torch.nn as nn
 from nflows.distributions.normal import StandardNormal
 from nflows.flows.base import Flow
-from nflows.transforms.autoregressive import MaskedAffineAutoregressiveTransform
+from nflows.transforms.autoregressive import (
+    MaskedAffineAutoregressiveTransform,
+    MaskedPiecewiseRationalQuadraticAutoregressiveTransform,
+)
 from nflows.transforms.base import CompositeTransform
 from nflows.transforms.permutations import RandomPermutation
 
@@ -21,18 +24,35 @@ class ConditionalSurfaceFlow(nn.Module):
         nt: int,
         hidden_features: int = 128,
         num_layers: int = 4,
+        transform_type: str = "spline",
+        num_bins: int = 8,
+        target_mode: str = "theta_raw",
     ) -> None:
         super().__init__()
         transforms = []
         for _ in range(num_layers):
             transforms.append(RandomPermutation(features=theta_dim))
-            transforms.append(
-                MaskedAffineAutoregressiveTransform(
-                    features=theta_dim,
-                    hidden_features=hidden_features,
-                    context_features=context_dim,
+            if transform_type == "affine":
+                transforms.append(
+                    MaskedAffineAutoregressiveTransform(
+                        features=theta_dim,
+                        hidden_features=hidden_features,
+                        context_features=context_dim,
+                    )
                 )
-            )
+            elif transform_type == "spline":
+                transforms.append(
+                    MaskedPiecewiseRationalQuadraticAutoregressiveTransform(
+                        features=theta_dim,
+                        hidden_features=hidden_features,
+                        context_features=context_dim,
+                        num_bins=num_bins,
+                        tails="linear",
+                        tail_bound=6.0,
+                    )
+                )
+            else:
+                raise ValueError("transform_type must be one of: affine, spline")
         transform = CompositeTransform(transforms)
         distribution = StandardNormal([theta_dim])
         self.flow = Flow(transform=transform, distribution=distribution)
@@ -41,6 +61,9 @@ class ConditionalSurfaceFlow(nn.Module):
         self.context_dim = context_dim
         self.nx = nx
         self.nt = nt
+        self.transform_type = transform_type
+        self.num_bins = num_bins
+        self.target_mode = target_mode
         self._context_mean: np.ndarray | None = None
         self._context_std: np.ndarray | None = None
         self._theta_mean: np.ndarray | None = None
@@ -122,14 +145,42 @@ class ConditionalSurfaceFlow(nn.Module):
             raise RuntimeError(f"Unexpected sample rank: {samples.dim()}")
         return self._denormalize_theta(samples)
 
-    def sample_surfaces(self, context: torch.Tensor, num_samples: int) -> torch.Tensor:
-        samples = self.sample_theta_raw(context=context, num_samples=num_samples)
-        batch, n, feat = samples.shape
-        decoded = self.decoder(samples.view(batch * n, feat))
+    def decode_theta_raw(
+        self,
+        theta_raw: torch.Tensor,
+        *,
+        base_theta_raw: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if theta_raw.dim() != 3:
+            raise ValueError("theta_raw must have shape [batch, num_samples, theta_dim]")
+        if self.target_mode == "delta_theta_raw":
+            if base_theta_raw is None:
+                raise ValueError("base_theta_raw is required when target_mode=delta_theta_raw")
+            if base_theta_raw.dim() != 2:
+                raise ValueError("base_theta_raw must have shape [batch, theta_dim]")
+            theta_raw = theta_raw + base_theta_raw.unsqueeze(1)
+        batch, n, feat = theta_raw.shape
+        decoded = self.decoder(theta_raw.view(batch * n, feat))
         return decoded.view(batch, n, self.nx, self.nt)
 
-    def conditional_mean_surface(
-        self, context: torch.Tensor, num_samples: int = 64
+    def sample_surfaces(
+        self,
+        context: torch.Tensor,
+        num_samples: int,
+        base_theta_raw: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        sampled = self.sample_surfaces(context=context, num_samples=num_samples)
+        samples = self.sample_theta_raw(context=context, num_samples=num_samples)
+        return self.decode_theta_raw(samples, base_theta_raw=base_theta_raw)
+
+    def conditional_mean_surface(
+        self,
+        context: torch.Tensor,
+        num_samples: int = 64,
+        base_theta_raw: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        sampled = self.sample_surfaces(
+            context=context,
+            num_samples=num_samples,
+            base_theta_raw=base_theta_raw,
+        )
         return sampled.mean(dim=1)

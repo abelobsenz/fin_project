@@ -23,7 +23,7 @@ from spygen.integrations.massive_flatfiles import (
     parse_option_symbol_osi,
 )
 from spygen.integrations.tradier import TradierClient, TradierConfig
-from spygen.models.context import build_context_features
+from spygen.models.context import append_lagged_surface_pca_features, build_context_features
 from spygen.models.sampling import (
     conditional_mean_surface,
     load_checkpoint,
@@ -1076,6 +1076,31 @@ def build_dataset_range(start: str, end: str, config: dict[str, Any]) -> Path:
     theta_arr = np.stack(theta_list).astype(np.float32)
     theta_raw_arr = np.stack(theta_raw_list).astype(np.float32)
 
+    train_cfg = config.get("train", {})
+    pca_components = int(train_cfg.get("pca_lag_components", 0))
+    pca_feature_names: list[str] = []
+    pca_stats: dict[str, float] = {}
+    if pca_components > 0:
+        context_arr, pca_feature_names, pca_stats = append_lagged_surface_pca_features(
+            context=context_arr,
+            repaired_surfaces=surface_arr,
+            n_components=pca_components,
+        )
+
+    theta_raw_prev = np.vstack([theta_raw_arr[0], theta_raw_arr[:-1]]).astype(np.float32)
+    theta_prev = np.vstack([theta_arr[0], theta_arr[:-1]]).astype(np.float32)
+    theta_raw_delta = (theta_raw_arr - theta_raw_prev).astype(np.float32)
+    theta_delta = (theta_arr - theta_prev).astype(np.float32)
+    target_mode = str(train_cfg.get("target_mode", "delta_theta_raw"))
+    if target_mode == "delta_theta_raw":
+        theta_target_raw = theta_raw_delta
+    elif target_mode == "theta_raw":
+        theta_target_raw = theta_raw_arr
+    else:
+        raise ValueError("train.target_mode must be one of: delta_theta_raw, theta_raw")
+
+    context_feature_names = list(context_df.columns) + pca_feature_names
+
     ds_path = processed_dir / "dataset.npz"
     np.savez_compressed(
         ds_path,
@@ -1085,6 +1110,15 @@ def build_dataset_range(start: str, end: str, config: dict[str, Any]) -> Path:
         surface_raw=surface_raw_arr,
         theta=theta_arr,
         theta_raw=theta_raw_arr,
+        theta_level=theta_arr,
+        theta_raw_level=theta_raw_arr,
+        theta_prev=theta_prev,
+        theta_raw_prev=theta_raw_prev,
+        theta_delta=theta_delta,
+        theta_raw_delta=theta_raw_delta,
+        theta_target_raw=theta_target_raw,
+        target_mode=np.array([target_mode]),
+        context_feature_names=np.array(context_feature_names, dtype="<U64"),
         x_grid=grid.x.astype(np.float32),
         tenors_days=np.array(grid.tenors_days, dtype=np.int32),
     )
@@ -1092,9 +1126,12 @@ def build_dataset_range(start: str, end: str, config: dict[str, Any]) -> Path:
     meta = {
         "rows": len(dates),
         "attempted_days": len(files),
-        "context_features": list(context_df.columns),
+        "context_features": context_feature_names,
         "nx": grid.nx,
         "nt": len(grid.tenors_days),
+        "target_mode": target_mode,
+        "pca_lag_components": int(pca_components),
+        **pca_stats,
         "built_at": datetime.now(UTC).isoformat(),
         "skip_counts": skip_counts,
     }
@@ -1124,6 +1161,14 @@ def train_from_config(config: dict[str, Any], dataset_path: str | Path | None = 
             hidden_size=int(train_cfg.get("hidden_size", 128)),
             flow_layers=int(train_cfg.get("flow_layers", 4)),
             early_stopping_patience=int(train_cfg.get("early_stopping_patience", 5)),
+            target_mode=str(train_cfg.get("target_mode", "delta_theta_raw")),
+            flow_transform=str(train_cfg.get("flow_transform", "spline")),
+            flow_bins=int(train_cfg.get("flow_bins", 8)),
+            aux_price_weight=float(train_cfg.get("aux_price_weight", 1.0)),
+            aux_iv_weight=float(train_cfg.get("aux_iv_weight", 0.1)),
+            aux_samples_train=int(train_cfg.get("aux_samples_train", 8)),
+            aux_samples_eval=int(train_cfg.get("aux_samples_eval", 32)),
+            early_stop_metric=str(train_cfg.get("early_stop_metric", "iv_rmse")),
         ),
         nx=grid.nx,
         nt=len(grid.tenors_days),
@@ -1140,14 +1185,44 @@ def eval_checkpoint(
     processed_dir = Path(config["paths"]["processed_dir"])
     ds_path = Path(dataset_path) if dataset_path else processed_dir / "dataset.npz"
     ds = np.load(ds_path, allow_pickle=True)
+    ds_keys = set(ds.files)
 
     context = ds["context"].astype(np.float32)
-    theta_raw = ds["theta_raw"].astype(np.float32)
+    theta_raw_target = (
+        ds["theta_target_raw"].astype(np.float32)
+        if "theta_target_raw" in ds_keys
+        else ds["theta_raw"].astype(np.float32)
+    )
+    theta_raw_level = (
+        ds["theta_raw_level"].astype(np.float32)
+        if "theta_raw_level" in ds_keys
+        else ds["theta_raw"].astype(np.float32)
+    )
+    mode_arr = ds["target_mode"] if "target_mode" in ds_keys else None
+    target_mode = str(mode_arr.reshape(-1)[0]) if mode_arr is not None else "theta_raw"
+    if target_mode == "delta_theta_raw":
+        if "theta_raw_prev" in ds_keys:
+            base_theta_raw = ds["theta_raw_prev"].astype(np.float32)
+        else:
+            base_theta_raw = np.vstack([theta_raw_level[0], theta_raw_level[:-1]])
+    else:
+        base_theta_raw = None
     model = load_checkpoint(checkpoint_path)
 
-    ll = log_likelihood(model, theta_raw=theta_raw, context=context)
-    samples = sample_surfaces(model, context=context[:1], n_samples=n_samples)[0]
-    mean_surfaces = conditional_mean_surface(model, context=context, n_samples=n_samples)
+    ll = log_likelihood(model, theta_raw=theta_raw_target, context=context)
+    sample_base = base_theta_raw[:1] if base_theta_raw is not None else None
+    samples = sample_surfaces(
+        model,
+        context=context[:1],
+        n_samples=n_samples,
+        base_theta_raw=sample_base,
+    )[0]
+    mean_surfaces = conditional_mean_surface(
+        model,
+        context=context,
+        n_samples=n_samples,
+        base_theta_raw=base_theta_raw,
+    )
 
     arb_ok = [is_arb_free(samples[i]) for i in range(samples.shape[0])]
     arb_rate = float(np.mean(arb_ok))
@@ -1168,6 +1243,7 @@ def eval_checkpoint(
     out_dir = ensure_dir(Path(config["paths"]["outputs_dir"]) / run_name)
     summary = {
         "n_obs": int(context.shape[0]),
+        "target_mode": target_mode,
         "mean_log_likelihood": float(np.mean(ll)),
         "median_log_likelihood": float(np.median(ll)),
         "sample_arb_pass_rate": arb_rate,
@@ -1330,6 +1406,14 @@ def walkforward_from_config(config: dict[str, Any], dataset_path: str | Path | N
                 hidden_size=int(train_cfg.get("hidden_size", 128)),
                 flow_layers=int(train_cfg.get("flow_layers", 4)),
                 early_stopping_patience=int(train_cfg.get("early_stopping_patience", 5)),
+                target_mode=str(train_cfg.get("target_mode", "delta_theta_raw")),
+                flow_transform=str(train_cfg.get("flow_transform", "spline")),
+                flow_bins=int(train_cfg.get("flow_bins", 8)),
+                aux_price_weight=float(train_cfg.get("aux_price_weight", 1.0)),
+                aux_iv_weight=float(train_cfg.get("aux_iv_weight", 0.1)),
+                aux_samples_train=int(train_cfg.get("aux_samples_train", 8)),
+                aux_samples_eval=int(train_cfg.get("aux_samples_eval", 32)),
+                early_stop_metric=str(train_cfg.get("early_stop_metric", "iv_rmse")),
             ),
             nx=grid.nx,
             nt=len(grid.tenors_days),

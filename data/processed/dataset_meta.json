@@ -1,15 +1,30 @@
 {
-  "rows": 250,
-  "attempted_days": 250,
+  "rows": 64,
+  "attempted_days": 64,
   "context_features": [
     "prev_return",
     "rv5",
     "rv20",
     "rv_ratio",
-    "trend_20"
+    "trend_20",
+    "rv_slope",
+    "vol_regime",
+    "trend_5_20",
+    "lag_surface_pc1",
+    "lag_surface_pc2",
+    "lag_surface_pc3",
+    "lag_surface_pc4"
   ],
   "nx": 21,
   "nt": 6,
-  "built_at": "2026-02-16T01:49:36.656095+00:00",
+  "target_mode": "delta_theta_raw",
+  "pca_lag_components": 4,
+  "lag_surface_pca_components": 4.0,
+  "lag_surface_pca_explained_total": 0.6240800842642784,
+  "lag_surface_pca_explained_pc1": 0.23386870324611664,
+  "lag_surface_pca_explained_pc2": 0.18313273787498474,
+  "lag_surface_pca_explained_pc3": 0.12039650231599808,
+  "lag_surface_pca_explained_pc4": 0.08668214082717896,
+  "built_at": "2026-02-16T02:19:49.767085+00:00",
   "skip_counts": {}
 }
