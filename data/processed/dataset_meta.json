@@ -1,0 +1,15 @@
+{
+  "rows": 250,
+  "attempted_days": 250,
+  "context_features": [
+    "prev_return",
+    "rv5",
+    "rv20",
+    "rv_ratio",
+    "trend_20"
+  ],
+  "nx": 21,
+  "nt": 6,
+  "built_at": "2026-02-16T01:49:36.656095+00:00",
+  "skip_counts": {}
+}

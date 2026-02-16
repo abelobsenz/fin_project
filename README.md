@@ -111,7 +111,9 @@ PYTHONPATH=src .venv/bin/python -m streamlit run src/spygen/ui_app.py
 
 UI shows:
 - observed repaired surface vs model conditional-mean surface
+- interactive 3D surface view (normalized call or implied vol; observed/model/residual)
 - residual heatmap and tenor slice comparison
+- dropdown-driven cross-sections (tenor slice or moneyness term-structure)
 - per-date log-likelihood / dislocation score
 - static-arbitrage checks on observed and generated samples
 - implied-volatility view: observed IV surface vs model-implied IV surface

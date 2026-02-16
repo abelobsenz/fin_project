@@ -1,0 +1,26 @@
+{
+  "symbol": "SPY",
+  "requested_start": "2025-01-01",
+  "requested_end": "2025-12-31",
+  "clean_requested": true,
+  "removed_counts": {
+    "raw": 8,
+    "underlying": 2,
+    "processed": 0,
+    "cache": 9
+  },
+  "underlying_path": "data/underlying/spy_eod.parquet",
+  "underlying_rows_raw": 250,
+  "underlying_rows_aligned": 250,
+  "days_attempted": 250,
+  "days_succeeded": 250,
+  "days_failed": 0,
+  "days_skipped_existing": 0,
+  "options_source": "flatfiles",
+  "success_range": {
+    "start": "2025-01-02",
+    "end": "2025-12-31"
+  },
+  "failed_examples": [],
+  "generated_at": "2026-02-16T01:44:04.810544+00:00"
+}

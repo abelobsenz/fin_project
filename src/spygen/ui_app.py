@@ -106,17 +106,48 @@ def _surface_to_iv(surface: np.ndarray, x_grid: np.ndarray, tenors_days: np.ndar
 def _line_fig(
     observed: np.ndarray,
     mean_surface: np.ndarray,
-    x_grid: np.ndarray,
-    tenor_days: int,
+    x_values: np.ndarray,
+    x_label: str,
+    title: str,
+    y_label: str,
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(6.5, 4.0))
-    ax.plot(x_grid, observed, label="Observed (repaired)", linewidth=2)
-    ax.plot(x_grid, mean_surface, label="Conditional mean", linewidth=2)
-    ax.set_title(f"Surface slice at tenor {tenor_days}D")
-    ax.set_xlabel("Log-moneyness x")
-    ax.set_ylabel("Normalized call")
+    ax.plot(x_values, observed, label="Observed (repaired)", linewidth=2)
+    ax.plot(x_values, mean_surface, label="Conditional mean", linewidth=2)
+    ax.set_title(title)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
     ax.grid(alpha=0.3)
     ax.legend(loc="best")
+    fig.tight_layout()
+    return fig
+
+
+def _surface_fig_3d(
+    surface: np.ndarray,
+    x_grid: np.ndarray,
+    tenors_days: np.ndarray,
+    title: str,
+    z_label: str,
+) -> plt.Figure:
+    fig = plt.figure(figsize=(7.2, 4.8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    tenor_mesh, x_mesh = np.meshgrid(tenors_days, x_grid)
+    surf = ax.plot_surface(
+        tenor_mesh,
+        x_mesh,
+        surface,
+        cmap="viridis",
+        linewidth=0.0,
+        antialiased=True,
+        alpha=0.95,
+    )
+    ax.set_title(title)
+    ax.set_xlabel("Tenor (days)")
+    ax.set_ylabel("Log-moneyness x")
+    ax.set_zlabel(z_label)
+    fig.colorbar(surf, ax=ax, shrink=0.65, pad=0.1)
     fig.tight_layout()
     return fig
 
@@ -294,25 +325,117 @@ def main() -> None:
     with col3:
         st.pyplot(_surface_fig(residual, x_grid, tenors_days, "Residual (Observed - Mean)"))
 
-    st.subheader("Tenor slice")
-    tenor_idx = st.slider(
-        "Tenor bucket",
-        min_value=0,
-        max_value=len(tenors_days) - 1,
-        value=min(2, len(tenors_days) - 1),
-    )
-    st.pyplot(
-        _line_fig(
-            observed[:, tenor_idx],
-            mean_surface[:, tenor_idx],
-            x_grid,
-            int(tenors_days[tenor_idx]),
-        )
-    )
-
     observed_iv = _surface_to_iv(observed, x_grid=x_grid, tenors_days=tenors_days)
     mean_iv = _surface_to_iv(mean_surface, x_grid=x_grid, tenors_days=tenors_days)
     iv_residual = observed_iv - mean_iv
+
+    st.subheader("3D fit surface")
+    view_type = st.selectbox(
+        "3D surface value",
+        ["Normalized call", "Implied volatility"],
+        index=0,
+        key="surface_3d_value",
+    )
+    surface_choice = st.selectbox(
+        "3D surface selection",
+        ["Observed", "Conditional mean", "Residual (Observed - Mean)"],
+        index=0,
+        key="surface_3d_select",
+    )
+
+    if view_type == "Normalized call":
+        if surface_choice == "Observed":
+            surf_data = observed
+        elif surface_choice == "Conditional mean":
+            surf_data = mean_surface
+        else:
+            surf_data = residual
+        z_label = "Normalized call"
+    else:
+        if surface_choice == "Observed":
+            surf_data = observed_iv
+        elif surface_choice == "Conditional mean":
+            surf_data = mean_iv
+        else:
+            surf_data = iv_residual
+        z_label = "Implied volatility"
+
+    st.pyplot(
+        _surface_fig_3d(
+            surf_data,
+            x_grid=x_grid,
+            tenors_days=tenors_days,
+            title=f"{surface_choice} ({view_type})",
+            z_label=z_label,
+        )
+    )
+
+    st.subheader("Cross-sections")
+    cross_mode = st.selectbox(
+        "Cross-section axis",
+        ["Tenor slice (vary x)", "Moneyness slice (vary tenor)"],
+        index=0,
+        key="cross_axis_mode",
+    )
+
+    if cross_mode == "Tenor slice (vary x)":
+        tenor_labels = [str(int(t)) for t in tenors_days]
+        selected_tenor = st.selectbox(
+            "Tenor bucket (days)",
+            tenor_labels,
+            index=min(2, len(tenor_labels) - 1),
+            key="cross_tenor_select",
+        )
+        tenor_idx = tenor_labels.index(selected_tenor)
+        x_vals = np.asarray(x_grid, dtype=float)
+        norm_obs = observed[:, tenor_idx]
+        norm_model = mean_surface[:, tenor_idx]
+        iv_obs_slice = observed_iv[:, tenor_idx]
+        iv_model_slice = mean_iv[:, tenor_idx]
+        x_label = "Log-moneyness x"
+        norm_title = f"Normalized call cross-section at tenor {selected_tenor}D"
+        iv_title = f"Implied vol cross-section at tenor {selected_tenor}D"
+    else:
+        x_labels = [f"{float(x):.2f}" for x in x_grid]
+        selected_x = st.selectbox(
+            "Log-moneyness x",
+            x_labels,
+            index=len(x_labels) // 2,
+            key="cross_x_select",
+        )
+        x_idx = x_labels.index(selected_x)
+        x_vals = np.asarray(tenors_days, dtype=float)
+        norm_obs = observed[x_idx, :]
+        norm_model = mean_surface[x_idx, :]
+        iv_obs_slice = observed_iv[x_idx, :]
+        iv_model_slice = mean_iv[x_idx, :]
+        x_label = "Tenor (days)"
+        norm_title = f"Normalized call term structure at x={selected_x}"
+        iv_title = f"Implied vol term structure at x={selected_x}"
+
+    cross_col1, cross_col2 = st.columns(2)
+    with cross_col1:
+        st.pyplot(
+            _line_fig(
+                observed=norm_obs,
+                mean_surface=norm_model,
+                x_values=x_vals,
+                x_label=x_label,
+                title=norm_title,
+                y_label="Normalized call",
+            )
+        )
+    with cross_col2:
+        st.pyplot(
+            _line_fig(
+                observed=iv_obs_slice,
+                mean_surface=iv_model_slice,
+                x_values=x_vals,
+                x_label=x_label,
+                title=iv_title,
+                y_label="Implied volatility",
+            )
+        )
 
     st.subheader("Implied volatility view")
     iv_col1, iv_col2, iv_col3 = st.columns(3)
@@ -322,16 +445,6 @@ def main() -> None:
         st.pyplot(_surface_fig(mean_iv, x_grid, tenors_days, "Model Implied Vol Surface"))
     with iv_col3:
         st.pyplot(_surface_fig(iv_residual, x_grid, tenors_days, "IV Residual (Observed - Model)"))
-
-    st.subheader("IV tenor slice")
-    st.pyplot(
-        _line_fig(
-            observed_iv[:, tenor_idx],
-            mean_iv[:, tenor_idx],
-            x_grid,
-            int(tenors_days[tenor_idx]),
-        )
-    )
 
     st.subheader("Run summaries")
     _show_run_tables()
