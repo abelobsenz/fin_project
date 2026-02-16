@@ -77,6 +77,33 @@ tradier:
   max_retries: 4
   backoff_base: 0.5
 
+massive:
+  base_url: https://api.massive.com
+  api_key_env_var: MASSIVE_API_KEY
+  max_history_days: 730
+  cache_enabled: true
+  cache_dir: data/massive_cache
+  connect_timeout: 10.0
+  read_timeout: 30.0
+  max_retries: 4
+  backoff_base: 0.5
+  fallback_rel_spread: 0.12
+  fallback_strike_band_pct: 0.25
+  fallback_max_contracts_per_expiry: 80
+  fallback_min_mid: 0.01
+
+massive_flatfiles:
+  endpoint_url: https://files.massive.com
+  bucket: flatfiles
+  prefix: us_options_opra/day_aggs_v1
+  aws_access_key_id_env_var: MASSIVE_FILES_ACCESS_KEY_ID
+  aws_secret_access_key_env_var: MASSIVE_FILES_SECRET_ACCESS_KEY
+  cache_enabled: true
+  cache_dir: data/massive_cache/flatfiles
+  read_chunksize: 250000
+  fallback_rel_spread: 0.08
+  fallback_min_mid: 0.01
+
 synth:
   seed: 123
   bad_quote_prob: 0.02

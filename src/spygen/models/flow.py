@@ -91,9 +91,35 @@ class ConditionalSurfaceFlow(nn.Module):
     def sample_theta_raw(self, context: torch.Tensor, num_samples: int) -> torch.Tensor:
         context_norm = self._normalize_context(context)
         samples = self.flow.sample(num_samples=num_samples, context=context_norm)
-        # nflows returns (batch, num_samples, features) when context is batched
-        if samples.dim() == 2:
-            samples = samples.unsqueeze(0)
+        if context_norm.dim() != 2:
+            raise ValueError("context must be rank-2 tensor [batch, context_dim]")
+        batch = int(context_norm.shape[0])
+
+        # nflows shape may vary by version:
+        # - (batch, num_samples, features)
+        # - (batch*num_samples, features)
+        # - (num_samples, features) when batch=1
+        if samples.dim() == 3:
+            if samples.shape[0] == num_samples and samples.shape[1] == batch:
+                samples = samples.permute(1, 0, 2).contiguous()
+            elif samples.shape[0] != batch or samples.shape[1] != num_samples:
+                raise RuntimeError(
+                    f"Unexpected 3D sample shape {tuple(samples.shape)} "
+                    f"for batch={batch}, num_samples={num_samples}"
+                )
+        elif samples.dim() == 2:
+            n_rows, feat = int(samples.shape[0]), int(samples.shape[1])
+            if n_rows == batch * num_samples:
+                samples = samples.view(batch, num_samples, feat)
+            elif batch == 1 and n_rows == num_samples:
+                samples = samples.unsqueeze(0)
+            else:
+                raise RuntimeError(
+                    f"Unexpected 2D sample shape {tuple(samples.shape)} "
+                    f"for batch={batch}, num_samples={num_samples}"
+                )
+        else:
+            raise RuntimeError(f"Unexpected sample rank: {samples.dim()}")
         return self._denormalize_theta(samples)
 
     def sample_surfaces(self, context: torch.Tensor, num_samples: int) -> torch.Tensor:

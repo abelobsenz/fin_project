@@ -4,7 +4,9 @@ Arbitrage-free deep generative modeling of SPY option surfaces (EOD) plus a simp
 
 ## What This Repo Does
 - Fetches SPY EOD underlying candles from Tradier `markets/history`.
+- Fetches SPY EOD underlying candles from Tradier or Massive.
 - Supports Tradier option endpoints (`lookup`, `expirations`, `chains`, `quotes`) for live snapshot / forward collection workflows.
+- Supports Massive market-data endpoints for bars, options contracts, and options chain snapshots.
 - Builds normalized call surfaces on a fixed log-moneyness/tenor grid.
 - Runs static-arbitrage checks and repairs surfaces with a convex QP (`cvxpy` + `OSQP`).
 - Converts repaired surfaces into nonnegative increment-curve parameters.
@@ -32,7 +34,42 @@ export TRADIER_TOKEN="..."
 2. Fetch EOD bars:
 ```bash
 python -m spygen fetch-underlying --start 2024-01-01 --end 2024-12-31 --symbol SPY
+python -m spygen collect-chains --asof 2026-02-15 --symbol SPY --greeks
 ```
+
+## Massive API Setup
+1. Set key:
+```bash
+export MASSIVE_API_KEY="..."
+export MASSIVE_FILES_ACCESS_KEY_ID="..."
+export MASSIVE_FILES_SECRET_ACCESS_KEY="..."
+```
+2. Fetch EOD bars:
+```bash
+python -m spygen fetch-underlying-massive --start 2024-01-01 --end 2024-12-31 --symbol SPY
+```
+3. Collect EOD-style option chains into `data/raw`:
+```bash
+python -m spygen collect-chains-massive --asof 2026-02-15 --symbol SPY --tenors 7,14,30,60,90,180
+```
+Notes:
+- Massive pulls are entitlement-guarded with `massive.max_history_days` (default `730`).
+- If a requested date is older than entitlement, the command raises a clear error.
+- For underlying range pulls, start date is clipped to entitlement cutoff when needed.
+- For historical options collection at scale, prefer flat files with `collect-chains-massive-flatfile` or `fetch-market-data-massive --options-source flatfiles`.
+
+Fetch an aligned underlying + options dataset over a period:
+```bash
+python -m spygen fetch-market-data-massive \
+  --start 2025-01-01 \
+  --end 2025-12-31 \
+  --symbol SPY \
+  --tenors 7,14,30,60,90,180 \
+  --options-source flatfiles \
+  --clean
+```
+This single command fetches underlying bars, collects daily chains for matching dates, and re-aligns `data/underlying/spy_eod.parquet` to only successful chain days.
+If fallback collection is too noisy/slow, lower `massive.fallback_max_contracts_per_expiry` and/or `massive.fallback_strike_band_pct` in config.
 
 ## Main CLI
 ```bash
@@ -43,6 +80,17 @@ python -m spygen eval --checkpoint outputs/checkpoints/flow_latest.pt
 python -m spygen backtest --checkpoint outputs/checkpoints/flow_latest.pt
 python -m spygen walkforward --config configs/default.yaml
 python -m spygen sanity
+```
+
+Collect Tradier live chains directly into `data/raw/YYYY-MM-DD.parquet` (same format used by dataset build/backtest):
+```bash
+python scripts/collect_eod_chains.py --asof 2026-02-15 --symbol SPY --greeks
+```
+
+Collect Massive chains / bars using standalone scripts:
+```bash
+python scripts/fetch_spy_eod_massive.py --start 2024-01-01 --end 2024-12-31 --symbol SPY
+python scripts/collect_eod_chains_massive.py --asof 2026-02-15 --symbol SPY
 ```
 
 Debug/loose trading mode (for plumbing validation):
@@ -73,7 +121,7 @@ UI shows:
 ## Backtest Artifacts
 Each backtest run under `outputs/backtests/run_*` writes:
 - `daily.parquet`: daily PnL/equity/turnover
-- `trade_blotter.parquet`: trade-level attribution (`edge_gross`, `edge_net`, `spread_paid`, `fill_slippage`, `fees`, exposure proxies)
+- `trade_blotter.parquet`: trade-level attribution (`edge_gross_usd`, `edge_net_usd`, `spread_paid`, `fill_slippage`, `fees`, exposure proxies)
 - `pnl_attribution.json`: costs, edge stats, hit rate, tail losses, per-structure decomposition
 - `gate_reasons.json`: aggregated gate reject/accept counters by structure
 - `execution_summary.json`: spread/slippage distributions and spread-gate skip rate
