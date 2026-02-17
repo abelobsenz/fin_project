@@ -178,7 +178,7 @@ def _build_parser() -> ArgumentParser:
     p.add_argument("--vae-lr", type=float, default=2e-3)
     p.add_argument("--vae-kl-beta", type=float, default=0.02)
     p.add_argument("--noarb-lambda", type=float, default=0.2)
-    p.add_argument("--head-epochs", type=int, default=100)
+    p.add_argument("--head-epochs", type=int, default=130)
     p.add_argument("--dyn-batch-size", type=int, default=64)
     p.add_argument("--contract-batch-size", type=int, default=2048)
     p.add_argument("--head-lr", type=float, default=1e-3)
@@ -230,19 +230,19 @@ def _build_parser() -> ArgumentParser:
     p.add_argument("--device", default=None)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--inference-batch-size", type=int, default=65536)
-    p.add_argument("--fill-gate", type=float, default=0.55)
+    p.add_argument("--fill-gate", type=float, default=0.65)
     p.add_argument("--slippage-bps", type=float, default=7.5)
-    p.add_argument("--max-trades-per-day", type=int, default=10)
+    p.add_argument("--max-trades-per-day", type=int, default=5)
     p.add_argument(
         "--signal-abs-gate",
         type=float,
-        default=1.7,
-        help="Require |signal| >= threshold before a contract is eligible for trading.",
+        default=0.04,
+        help="Require |signal| >= threshold (signal is relative edge: (mid_now - pred_next) / mid_now) before a contract is eligible for trading.",
     )
-    p.add_argument("--min-dte", type=int, default=3)
+    p.add_argument("--min-dte", type=int, default=7)
     p.add_argument("--max-dte", type=int, default=75)
-    p.add_argument("--min-moneyness", type=float, default=0.92)
-    p.add_argument("--max-moneyness", type=float, default=1.02)
+    p.add_argument("--min-moneyness", type=float, default=0.88)
+    p.add_argument("--max-moneyness", type=float, default=1.12)
     p.add_argument("--max-rel-spread", type=float, default=0.10)
     p.set_defaults(func=_backtest_command)
 

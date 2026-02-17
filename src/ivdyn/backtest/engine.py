@@ -20,7 +20,7 @@ except Exception as exc:  # pragma: no cover
 from ivdyn.model import ModelBundle, device_auto, to_numpy
 
 _OPRA_EXPIRY_RE = re.compile(r"^O:[A-Z]+(?P<exp>\d{6})[CP]\d{8}$")
-_BACKTEST_VERSION = "2026-02-17-selector-hedged-v2"
+_BACKTEST_VERSION = "2026-02-17-selector-hedged-v3"
 
 
 @dataclass(slots=True)
@@ -31,10 +31,10 @@ class BacktestConfig:
     num_workers: int = 0
     inference_batch_size: int = 65536
 
-    fill_gate: float = 0.55
+    fill_gate: float = 0.65
     slippage_bps: float = 7.5
-    signal_abs_gate: float = 0.0
-    max_trades_per_day: int = 10
+    signal_abs_gate: float = 0.04
+    max_trades_per_day: int = 5
     selector_edge_clip_quantile: float = 0.95
     selector_mid_norm_floor: float = 0.0025
     selector_signal_soft_cap: float = 250.0
@@ -42,11 +42,11 @@ class BacktestConfig:
     selector_long_abs_signal_cap: float = 6.0
     selector_allow_long_puts: bool = False
 
-    min_dte: int = 14
+    min_dte: int = 7
     max_dte: int = 75
-    min_moneyness: float = 0.75
-    max_moneyness: float = 1.05
-    max_rel_spread: float = 0.15
+    min_moneyness: float = 0.88
+    max_moneyness: float = 1.12
+    max_rel_spread: float = 0.10
     hedge_max_net_delta_ratio: float = 0.20
     hedge_relaxed_net_delta_ratio: float = 0.30
     hedge_max_net_delta_abs: float = 0.75
@@ -170,8 +170,10 @@ def _predict_contracts(
             zc_now = torch.as_tensor(z_now[d], dtype=torch.float32, device=dev)
             zc_next = torch.as_tensor(z_next[d], dtype=torch.float32, device=dev)
 
-            pred_now[idx] = to_numpy(model.forward_pricer(zc_now, cf)).reshape(-1)
-            pred_next[idx] = to_numpy(model.forward_pricer(zc_next, cf)).reshape(-1)
+            p_now_scaled = to_numpy(model.forward_pricer(zc_now, cf)).reshape(-1, 1)
+            p_next_scaled = to_numpy(model.forward_pricer(zc_next, cf)).reshape(-1, 1)
+            pred_now[idx] = model_bundle.price_scaler.inverse_transform(p_now_scaled).reshape(-1)
+            pred_next[idx] = model_bundle.price_scaler.inverse_transform(p_next_scaled).reshape(-1)
             logits = to_numpy(model.forward_execution_logit(zc_now, cf)).reshape(-1)
             fill_prob[idx] = _sigmoid(logits).astype(np.float32)
 
@@ -187,13 +189,56 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     ds = _load_dataset(dataset_path)
 
     dev = torch.device(cfg.device) if cfg.device else device_auto()
-    bundle = ModelBundle.load(run_dir / "model.pt", device=dev)
-    pred_now_norm, pred_next_norm, fill_prob = _predict_contracts(
-        model_bundle=bundle,
-        ds=ds,
-        dev=dev,
-        batch_size=max(1, int(cfg.inference_batch_size)),
-    )
+    model_path = run_dir / "model.pt"
+    bundle = ModelBundle.load(model_path, device=dev)
+
+    # Cache inference to allow fast strategy iteration.
+    cache_path = bt_dir / "pred_cache.npz"
+    cache_meta_path = bt_dir / "pred_cache_meta.json"
+    use_cache = False
+    if cache_path.exists() and cache_meta_path.exists():
+        try:
+            meta = json.loads(cache_meta_path.read_text(encoding="utf-8"))
+            if (
+                meta.get("dataset") == str(dataset_path)
+                and meta.get("model") == str(model_path)
+                and int(meta.get("dataset_mtime", -1)) == int(dataset_path.stat().st_mtime)
+                and int(meta.get("model_mtime", -1)) == int(model_path.stat().st_mtime)
+            ):
+                use_cache = True
+        except Exception:
+            use_cache = False
+
+    if use_cache:
+        cached = np.load(cache_path, allow_pickle=False)
+        pred_now_norm = cached["pred_now_norm"].astype(np.float32)
+        pred_next_norm = cached["pred_next_norm"].astype(np.float32)
+        fill_prob = cached["fill_prob"].astype(np.float32)
+    else:
+        pred_now_norm, pred_next_norm, fill_prob = _predict_contracts(
+            model_bundle=bundle,
+            ds=ds,
+            dev=dev,
+            batch_size=max(1, int(cfg.inference_batch_size)),
+        )
+        np.savez_compressed(
+            cache_path,
+            pred_now_norm=pred_now_norm.astype(np.float32),
+            pred_next_norm=pred_next_norm.astype(np.float32),
+            fill_prob=fill_prob.astype(np.float32),
+        )
+        cache_meta_path.write_text(
+            json.dumps(
+                {
+                    "dataset": str(dataset_path),
+                    "model": str(model_path),
+                    "dataset_mtime": int(dataset_path.stat().st_mtime),
+                    "model_mtime": int(model_path.stat().st_mtime),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     dates = ds["dates"].astype(str)
     n_dates = len(dates)

@@ -143,6 +143,17 @@ class ModelBundle:
     def load(cls, path: Path, device: str | torch.device | None = None) -> "ModelBundle":
         map_location = device or "cpu"
         try:
+            # Compatibility shim: allow loading artifacts saved under numpy>=2 (module name numpy._core)
+            try:
+                import sys
+                import numpy.core as _np_core
+                sys.modules.setdefault("numpy._core", _np_core)
+                sys.modules.setdefault("numpy._core.multiarray", _np_core.multiarray)
+                if hasattr(_np_core, "_multiarray_umath"):
+                    sys.modules.setdefault("numpy._core._multiarray_umath", _np_core._multiarray_umath)
+            except Exception:
+                # If this fails, torch.load will raise a more informative error below.
+                pass
             payload = torch.load(path, map_location=map_location, weights_only=False)
         except TypeError:
             # Older torch versions do not support weights_only argument.

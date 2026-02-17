@@ -1,0 +1,22 @@
+{
+  "test_contracts": 34200,
+  "price_rmse": 0.006398817989975214,
+  "price_mae": 0.0014862698735669255,
+  "price_r2": 0.988787055015564,
+  "exec_brier": 0.012482008896768093,
+  "exec_positive_rate": 0.8083040714263916,
+  "next_test_contracts": 6422,
+  "next_price_rmse": 0.006565791554749012,
+  "next_price_mae": 0.002221128437668085,
+  "next_price_r2": 0.9671168327331543,
+  "next_return_directional_acc": 0.4573341638118966,
+  "next_return_corr": 0.0004369581021912698,
+  "surface_iv_rmse": 0.02258734218776226,
+  "surface_iv_mae": 0.013662324286997318,
+  "calendar_violation_obs_mean": 0.026065165176987648,
+  "calendar_violation_pred_mean": 0.0007518797065131366,
+  "butterfly_violation_obs_mean": 0.23222529888153076,
+  "butterfly_violation_pred_mean": 0.20360112190246582,
+  "num_workers": 13,
+  "parallel_backend": "process"
+}

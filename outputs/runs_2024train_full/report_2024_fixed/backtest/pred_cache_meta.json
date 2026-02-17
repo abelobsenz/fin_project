@@ -1,0 +1,6 @@
+{
+  "dataset": "/Users/abelobsenz/fin_project copy/outputs/dataset_train_2024_full/dataset.npz",
+  "model": "/Users/abelobsenz/fin_project copy/outputs/runs_2024train_full/report_2024_fixed/model.pt",
+  "dataset_mtime": 1771295552,
+  "model_mtime": 1771313633
+}
