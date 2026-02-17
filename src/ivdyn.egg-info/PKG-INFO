@@ -36,12 +36,13 @@ Requires-Dist: boto3>=1.34
 pip install -e .
 ivdyn pull-underlying-massive --data-root data --symbol SPY --start-date 2024-07-01 --end-date 2024-12-31
 ivdyn pull-flatfiles --data-root data --start-date 2024-07-01 --end-date 2024-12-31
+ivdyn pull-options-symbol --data-root data --symbol SPY --start-date 2024-07-01 --end-date 2024-12-31
 ivdyn pull-massive --data-root data --symbol SPY --start-date 2024-07-01 --end-date 2024-12-31
-ivdyn build-dataset --data-root data --out-dir outputs/dataset
-ivdyn build-dataset --data-root data --out-dir outputs/dataset_2024h2 --plugin massive_flatfile_aggs --start-date 2024-07-01 --end-date 2024-12-31
-ivdyn train --dataset outputs/dataset/dataset.npz --out-dir outputs/runs
-ivdyn evaluate --run-dir outputs/runs/<RUN_ID> --dataset outputs/dataset/dataset.npz
-ivdyn backtest --run-dir outputs/runs/<RUN_ID> --dataset outputs/dataset/dataset.npz
+ivdyn build-dataset --data-root data --out-dir outputs/datasets/dataset
+ivdyn build-dataset --data-root data --out-dir outputs/datasets/dataset_2024h2 --plugin massive_flatfile_aggs --start-date 2024-07-01 --end-date 2024-12-31
+ivdyn train --dataset outputs/datasets/dataset/dataset.npz --out-dir outputs/runs
+ivdyn evaluate --run-dir outputs/runs/<RUN_ID> --dataset outputs/datasets/dataset/dataset.npz
+ivdyn backtest --run-dir outputs/runs/<RUN_ID> --dataset outputs/datasets/dataset/dataset.npz
 ivdyn ui --run-dir outputs/runs/<RUN_ID>
 ```
 
@@ -51,17 +52,23 @@ ivdyn ui --run-dir outputs/runs/<RUN_ID>
 
 Expected folders:
 
-- `data/raw/*.parquet` and `data/raw/*.metadata.json` (Massive-derived chain snapshots)
-- `data/underlying/spy_eod.parquet` (underlying EOD prices)
-- Optional cache: `data/massive_cache/flatfiles/...`
+- `data/symbols/SPY/options/raw/*.parquet` and `*.metadata.json` (Massive-derived chain snapshots)
+- `data/symbols/SPY/underlying/spy_eod.parquet` (underlying EOD prices)
+- Full-exchange OPRA source: `data/options_source/us_options_opra/day_aggs_v1/YYYY/MM/*.csv.gz`
+- Symbol raw options (from source extraction): `data/symbols/SPY/options/raw/*.parquet`
 
-`pull-underlying-massive` fetches true underlying daily bars into `data/underlying/<symbol>_eod.parquet`.
+`pull-underlying-massive` fetches true underlying daily bars into
+`data/symbols/<SYMBOL>/underlying/<symbol>_eod.parquet`.
 
-`pull-massive` uses the Massive REST snapshot endpoint and writes daily files to `data/raw`.
+`pull-massive` uses the Massive REST snapshot endpoint and writes daily files to
+`data/symbols/<SYMBOL>/options/raw`.
 Set `MASSIVE_API_KEY` (or pass `--api-key`).
 
-`pull-flatfiles` uses Massive's S3-compatible flatfiles endpoint and writes day files under:
-`data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/YYYY/MM/*.csv.gz`.
+`pull-flatfiles` uses Massive's S3-compatible flatfiles endpoint and writes full OPRA day files under:
+`data/options_source/us_options_opra/day_aggs_v1/YYYY/MM/*.csv.gz`.
+
+`pull-options-symbol` extracts one symbol from `data/options_source` and writes canonical daily files to:
+`data/symbols/<SYMBOL>/options/raw/YYYY-MM-DD.parquet`.
 Credentials are read from `.env` keys:
 `MASSIVE_FLATFILES_ACCESS_KEY`, `MASSIVE_FLATFILES_SECRET_ACCESS_KEY`,
 `MASSIVE_FLATFILES_ENDPOINT_URL`, `MASSIVE_FLATFILES_BUCKET`, `MASSIVE_FLATFILES_PREFIX`.

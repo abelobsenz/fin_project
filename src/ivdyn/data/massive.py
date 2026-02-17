@@ -55,7 +55,7 @@ class OptionsDataPlugin(ABC):
 
 @dataclass(slots=True)
 class MassiveRawParquetPlugin(OptionsDataPlugin):
-    """Reads canonical Massive-derived snapshots from data/raw/*.parquet."""
+    """Reads canonical Massive-derived snapshots from data/symbols/<SYMBOL>/options/raw/*.parquet."""
 
     raw_dir: Path
     name: str = "massive_raw_parquet"
@@ -233,15 +233,19 @@ class PluginFactory:
     def build(
         self,
         plugin_name: str,
+        symbol: str = "SPY",
         api_key: str | None = None,
     ) -> OptionsDataPlugin:
         plugin_name = plugin_name.lower().strip()
+        sym_u = symbol.upper()
+        sym_l = symbol.lower()
+        sym_root = self.data_root / "symbols" / sym_u
         if plugin_name == "massive_raw_parquet":
-            return MassiveRawParquetPlugin(raw_dir=self.data_root / "raw")
+            return MassiveRawParquetPlugin(raw_dir=sym_root / "options" / "raw")
         if plugin_name == "massive_flatfile_aggs":
             return MassiveFlatfileAggsPlugin(
-                flatfile_root=self.data_root / "massive_cache" / "flatfiles" / "us_options_opra" / "day_aggs_v1",
-                underlying_path=self.data_root / "underlying" / "spy_eod.parquet",
+                flatfile_root=self.data_root / "options_source" / "us_options_opra" / "day_aggs_v1",
+                underlying_path=sym_root / "underlying" / f"{sym_l}_eod.parquet",
             )
         if plugin_name == "massive_rest":
             if not api_key:

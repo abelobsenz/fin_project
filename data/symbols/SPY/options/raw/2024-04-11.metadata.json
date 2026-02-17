@@ -1,0 +1,10 @@
+{
+  "symbol": "SPY",
+  "as_of": "2024-04-11",
+  "source_path": "data/options_source/us_options_opra/day_aggs_v1/2024/04/2024-04-11.csv.gz",
+  "rows_source": 208735,
+  "rows_symbol_raw": 4163,
+  "rows_saved": 4046,
+  "missing_source": false,
+  "path": "/Users/abelobsenz/fin_project copy/data/symbols/SPY/options/raw/2024-04-11.parquet"
+}

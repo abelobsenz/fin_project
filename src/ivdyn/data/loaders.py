@@ -79,9 +79,7 @@ def _parse_date(v: str | None) -> date | None:
 
 
 def _load_underlying_close(data_root: Path, symbol: str) -> pd.Series:
-    p = data_root / "underlying" / f"{symbol.lower()}_eod.parquet"
-    if not p.exists():
-        p = data_root / "underlying" / "spy_eod.parquet"
+    p = data_root / "symbols" / symbol.upper() / "underlying" / f"{symbol.lower()}_eod.parquet"
     if not p.exists():
         return pd.Series(dtype=float)
     udf = pd.read_parquet(p)
@@ -244,7 +242,7 @@ def _process_one_day(
     t_arr = np.asarray(tenor_days, dtype=np.int32)
 
     factory = PluginFactory(Path(data_root))
-    plugin = factory.build(plugin_name=plugin_name, api_key=api_key)
+    plugin = factory.build(plugin_name=plugin_name, symbol=symbol, api_key=api_key)
 
     try:
         chain = plugin.load_day(symbol, asof)
@@ -291,7 +289,7 @@ def build_dataset(cfg: DatasetBuildConfig) -> dict[str, Path]:
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
 
     factory = PluginFactory(cfg.data_root)
-    plugin = factory.build(plugin_name=cfg.plugin, api_key=cfg.api_key)
+    plugin = factory.build(plugin_name=cfg.plugin, symbol=cfg.symbol, api_key=cfg.api_key)
 
     all_dates = sorted(plugin.list_dates(cfg.symbol))
     start = _parse_date(cfg.start_date)
@@ -306,7 +304,7 @@ def build_dataset(cfg: DatasetBuildConfig) -> dict[str, Path]:
         if spot_series.empty:
             raise RuntimeError(
                 "No underlying close file found for flatfile mode. "
-                "Expected data/underlying/spy_eod.parquet (or <symbol>_eod.parquet). "
+                "Expected data/symbols/<SYMBOL>/underlying/<symbol>_eod.parquet. "
                 "Run `ivdyn pull-underlying-massive --symbol SPY --start-date ... --end-date ...` first."
             )
         spot_dates = set(spot_series.index.tolist())
@@ -381,7 +379,7 @@ def build_dataset(cfg: DatasetBuildConfig) -> dict[str, Path]:
         if cfg.plugin == "massive_flatfile_aggs":
             hint = (
                 " For flatfile mode, ensure day_aggs files exist under "
-                "data/massive_cache/flatfiles/us_options_opra/day_aggs_v1 and "
+                "data/options_source/us_options_opra/day_aggs_v1 and "
                 "requested dates are present."
             )
         raise RuntimeError(f"No valid dates were built. Check plugin/data filters.{hint}")

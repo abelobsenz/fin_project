@@ -1,0 +1,10 @@
+{
+  "symbol": "SPY",
+  "as_of": "2025-07-04",
+  "source_path": "data/options_source/us_options_opra/day_aggs_v1/2025/07/2025-07-04.csv.gz",
+  "rows_source": 0,
+  "rows_symbol_raw": 0,
+  "rows_saved": 0,
+  "missing_source": true,
+  "path": null
+}

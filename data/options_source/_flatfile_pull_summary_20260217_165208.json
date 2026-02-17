@@ -1,0 +1,110 @@
+{
+  "source": "massive_flatfiles_s3",
+  "endpoint_url": "https://files.massive.com",
+  "bucket": "flatfiles",
+  "prefix": "us_options_opra/day_aggs_v1",
+  "start_date": "2024-02-17",
+  "end_date": "2025-12-31",
+  "trading_days_considered": 488,
+  "downloaded": 469,
+  "skipped_existing": 0,
+  "missing_or_error": 19,
+  "output_root": "/Users/abelobsenz/fin_project copy/data/options_source",
+  "failures_sample": [
+    {
+      "date": "2024-02-19",
+      "key": "us_options_opra/day_aggs_v1/2024/02/2024-02-19.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-03-29",
+      "key": "us_options_opra/day_aggs_v1/2024/03/2024-03-29.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-05-27",
+      "key": "us_options_opra/day_aggs_v1/2024/05/2024-05-27.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-06-19",
+      "key": "us_options_opra/day_aggs_v1/2024/06/2024-06-19.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-07-04",
+      "key": "us_options_opra/day_aggs_v1/2024/07/2024-07-04.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-09-02",
+      "key": "us_options_opra/day_aggs_v1/2024/09/2024-09-02.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-11-28",
+      "key": "us_options_opra/day_aggs_v1/2024/11/2024-11-28.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-12-25",
+      "key": "us_options_opra/day_aggs_v1/2024/12/2024-12-25.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-01-01",
+      "key": "us_options_opra/day_aggs_v1/2025/01/2025-01-01.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-01-09",
+      "key": "us_options_opra/day_aggs_v1/2025/01/2025-01-09.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-01-20",
+      "key": "us_options_opra/day_aggs_v1/2025/01/2025-01-20.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-02-17",
+      "key": "us_options_opra/day_aggs_v1/2025/02/2025-02-17.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-04-18",
+      "key": "us_options_opra/day_aggs_v1/2025/04/2025-04-18.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-05-26",
+      "key": "us_options_opra/day_aggs_v1/2025/05/2025-05-26.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-06-19",
+      "key": "us_options_opra/day_aggs_v1/2025/06/2025-06-19.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-07-04",
+      "key": "us_options_opra/day_aggs_v1/2025/07/2025-07-04.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-09-01",
+      "key": "us_options_opra/day_aggs_v1/2025/09/2025-09-01.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-11-27",
+      "key": "us_options_opra/day_aggs_v1/2025/11/2025-11-27.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2025-12-25",
+      "key": "us_options_opra/day_aggs_v1/2025/12/2025-12-25.csv.gz",
+      "error": "An error occurred (404) when calling the HeadObject operation: Not Found"
+    }
+  ]
+}

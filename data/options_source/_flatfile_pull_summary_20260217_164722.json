@@ -1,0 +1,20 @@
+{
+  "source": "massive_flatfiles_s3",
+  "endpoint_url": "https://files.massive.com",
+  "bucket": "flatfiles",
+  "prefix": "us_options_opra/day_aggs_v1",
+  "start_date": "2024-02-19",
+  "end_date": "2024-02-19",
+  "trading_days_considered": 1,
+  "downloaded": 0,
+  "skipped_existing": 0,
+  "missing_or_error": 1,
+  "output_root": "/Users/abelobsenz/fin_project copy/data/options_source",
+  "failures_sample": [
+    {
+      "date": "2024-02-19",
+      "key": "us_options_opra/day_aggs_v1/2024/02/2024-02-19.csv.gz",
+      "error": "Could not connect to the endpoint URL: \"https://files.massive.com/flatfiles/us_options_opra/day_aggs_v1/2024/02/2024-02-19.csv.gz\""
+    }
+  ]
+}

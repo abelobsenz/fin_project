@@ -1,0 +1,10 @@
+{
+  "symbol": "AAPL",
+  "as_of": "2025-01-15",
+  "source_path": "data/options_source/us_options_opra/day_aggs_v1/2025/01/2025-01-15.csv.gz",
+  "rows_source": 259211,
+  "rows_symbol_raw": 1143,
+  "rows_saved": 1143,
+  "missing_source": false,
+  "path": "/Users/abelobsenz/fin_project copy/data/symbols/AAPL/options/raw/2025-01-15.parquet"
+}

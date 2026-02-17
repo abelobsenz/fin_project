@@ -74,7 +74,7 @@ def _resolve_run_dir() -> Path:
     with st.sidebar:
         st.header("Run Selection")
         run_dir_str = st.text_input("Run directory", value=default)
-        dataset_str = st.text_input("Dataset path", value="outputs/dataset/dataset.npz")
+        dataset_str = st.text_input("Dataset path", value="outputs/datasets/dataset/dataset.npz")
         st.session_state["dataset_path"] = dataset_str
 
     return Path(run_dir_str)
