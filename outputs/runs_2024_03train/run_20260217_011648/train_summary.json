@@ -1,0 +1,6 @@
+{
+  "model_path": "/Users/abelobsenz/fin_project copy/outputs/runs_2024_03train/run_20260217_011648/model.pt",
+  "dataset_path": "/Users/abelobsenz/fin_project copy/outputs/dataset_train_2024_03/dataset.npz",
+  "device": "mps",
+  "final_val_recon": 2.262366771697998
+}

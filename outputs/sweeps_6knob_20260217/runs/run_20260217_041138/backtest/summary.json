@@ -1,0 +1,17 @@
+{
+  "days": 249,
+  "trades": 3984,
+  "total_pnl": -9237.013133302331,
+  "avg_daily_pnl": -37.09643828635474,
+  "daily_vol_pnl": 1492.5941359056253,
+  "daily_sharpe": -0.39453973938762205,
+  "max_drawdown": -92.91776292476769,
+  "max_drawdown_abs": -25837.3110370636,
+  "win_rate": 0.4819277108433735,
+  "fill_gate": 0.55,
+  "long_short_count": 8,
+  "slippage_bps": 7.5,
+  "num_workers": 13,
+  "parallel_backend": "thread",
+  "inference_batch_size": 65536
+}

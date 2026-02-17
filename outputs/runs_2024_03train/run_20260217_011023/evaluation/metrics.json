@@ -1,0 +1,16 @@
+{
+  "test_contracts": 2700,
+  "price_rmse": NaN,
+  "price_mae": NaN,
+  "price_r2": NaN,
+  "exec_brier": NaN,
+  "exec_positive_rate": 0.0,
+  "surface_iv_rmse": NaN,
+  "surface_iv_mae": NaN,
+  "calendar_violation_obs_mean": 0.0031746032182127237,
+  "calendar_violation_pred_mean": 0.0,
+  "butterfly_violation_obs_mean": 0.2631578743457794,
+  "butterfly_violation_pred_mean": 0.0,
+  "num_workers": 3,
+  "parallel_backend": "process"
+}

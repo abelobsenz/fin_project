@@ -1,142 +1,65 @@
-# spy-arbfree-surface-gen
+# ivdyn
 
-Arbitrage-free deep generative modeling of SPY option surfaces (EOD) plus a simple synthetic-data backtest for a surface dislocation mean-reversion strategy.
+`ivdyn` is a from-scratch package for learning implied-volatility and option-pricing dynamics from Massive.com datasets.
 
-## What This Repo Does
-- Fetches SPY EOD underlying candles from Tradier `markets/history`.
-- Fetches SPY EOD underlying candles from Tradier or Massive.
-- Supports Tradier option endpoints (`lookup`, `expirations`, `chains`, `quotes`) for live snapshot / forward collection workflows.
-- Supports Massive market-data endpoints for bars, options contracts, and options chain snapshots.
-- Builds normalized call surfaces on a fixed log-moneyness/tenor grid.
-- Runs static-arbitrage checks and repairs surfaces with a convex QP (`cvxpy` + `OSQP`).
-- Converts repaired surfaces into nonnegative increment-curve parameters.
-- Trains either:
-  - a conditional normalizing flow (`PyTorch` + `nflows`) for `p(theta | context)`, or
-  - a hybrid deep-smoothing model (prior + regime-aware mixture-of-experts + heteroskedastic uncertainty).
-- Backtests a simple EOD dislocation strategy using bid/ask-aware one-day holding rules.
+## What It Implements
 
-## Tradier Data Notes
-- External data provider is **Tradier only**.
-- Tradier historical options for expired contracts are not available (see Tradier historical-data note), so offline backtests in this repo are synthetic by default.
-- CI never performs network calls; Tradier integration tests run on saved JSON fixtures.
+- Massive-compatible data plugins (raw parquet snapshots, local OPRA flatfile aggs, REST hooks).
+- Surface builder with liquidity-aware gridding and static no-arbitrage diagnostics.
+- Multi-stage deep model (VAE encoder/decoder + latent dynamics + pricing head + execution head) implemented in PyTorch.
+- Evaluation and backtest-ready artifacts.
+- Streamlit dashboard with graphical and numerical model evidence.
 
-## Quickstart (Offline Synthetic)
+## Quickstart
+
 ```bash
-python -m pip install -e .[dev]
-ruff check .
-pytest
-python -m spygen sanity
+pip install -e .
+ivdyn pull-underlying-massive --data-root data --symbol SPY --start-date 2024-07-01 --end-date 2024-12-31
+ivdyn pull-flatfiles --data-root data --start-date 2024-07-01 --end-date 2024-12-31
+ivdyn pull-massive --data-root data --symbol SPY --start-date 2024-07-01 --end-date 2024-12-31
+ivdyn build-dataset --data-root data --out-dir outputs/dataset
+ivdyn build-dataset --data-root data --out-dir outputs/dataset_2024h2 --plugin massive_flatfile_aggs --start-date 2024-07-01 --end-date 2024-12-31
+ivdyn train --dataset outputs/dataset/dataset.npz --out-dir outputs/runs
+ivdyn evaluate --run-dir outputs/runs/<RUN_ID> --dataset outputs/dataset/dataset.npz
+ivdyn backtest --run-dir outputs/runs/<RUN_ID> --dataset outputs/dataset/dataset.npz
+ivdyn ui --run-dir outputs/runs/<RUN_ID>
 ```
 
-## Real SPY Underlying Fetch (Tradier)
-1. Set token:
-```bash
-export TRADIER_TOKEN="..."
-```
-2. Fetch EOD bars:
-```bash
-python -m spygen fetch-underlying --start 2024-01-01 --end 2024-12-31 --symbol SPY
-python -m spygen collect-chains --asof 2026-02-15 --symbol SPY --greeks
-```
+`evaluate`, `backtest`, and `ui` default to the most recent run in `outputs/runs` when `--run-dir` is omitted.
 
-## Massive API Setup
-1. Set key:
-```bash
-export MASSIVE_API_KEY="..."
-export MASSIVE_FILES_ACCESS_KEY_ID="..."
-export MASSIVE_FILES_SECRET_ACCESS_KEY="..."
-```
-2. Fetch EOD bars:
-```bash
-python -m spygen fetch-underlying-massive --start 2024-01-01 --end 2024-12-31 --symbol SPY
-```
-3. Collect EOD-style option chains into `data/raw`:
-```bash
-python -m spygen collect-chains-massive --asof 2026-02-15 --symbol SPY --tenors 7,14,30,60,90,180
-```
-Notes:
-- Massive pulls are entitlement-guarded with `massive.max_history_days` (default `730`).
-- If a requested date is older than entitlement, the command raises a clear error.
-- For underlying range pulls, start date is clipped to entitlement cutoff when needed.
-- For historical options collection at scale, prefer flat files with `collect-chains-massive-flatfile` or `fetch-market-data-massive --options-source flatfiles`.
+## Data Inputs
 
-Fetch an aligned underlying + options dataset over a period:
-```bash
-python -m spygen fetch-market-data-massive \
-  --start 2025-01-01 \
-  --end 2025-12-31 \
-  --symbol SPY \
-  --tenors 7,14,30,60,90,180 \
-  --options-source flatfiles \
-  --clean
-```
-This single command fetches underlying bars, collects daily chains for matching dates, and re-aligns `data/underlying/spy_eod.parquet` to only successful chain days.
-If fallback collection is too noisy/slow, lower `massive.fallback_max_contracts_per_expiry` and/or `massive.fallback_strike_band_pct` in config.
+Expected folders:
 
-## Main CLI
-```bash
-python -m spygen synth-data --start 2024-01-02 --end 2024-03-29
-python -m spygen build-dataset --start 2024-01-02 --end 2024-03-29
-python -m spygen train --config configs/default.yaml
-python -m spygen eval --checkpoint outputs/checkpoints/flow_latest.pt
-python -m spygen backtest --checkpoint outputs/checkpoints/flow_latest.pt
-python -m spygen walkforward --config configs/default.yaml
-python -m spygen sanity
-```
+- `data/raw/*.parquet` and `data/raw/*.metadata.json` (Massive-derived chain snapshots)
+- `data/underlying/spy_eod.parquet` (underlying EOD prices)
+- Optional cache: `data/massive_cache/flatfiles/...`
 
-`configs/default.yaml` includes `data_guard.require_years: [2025]`, so train/eval/backtest/walkforward will fail fast if `data/processed/dataset.npz` is not built from 2025 dates.
+`pull-underlying-massive` fetches true underlying daily bars into `data/underlying/<symbol>_eod.parquet`.
 
-Collect Tradier live chains directly into `data/raw/YYYY-MM-DD.parquet` (same format used by dataset build/backtest):
-```bash
-python scripts/collect_eod_chains.py --asof 2026-02-15 --symbol SPY --greeks
-```
+`pull-massive` uses the Massive REST snapshot endpoint and writes daily files to `data/raw`.
+Set `MASSIVE_API_KEY` (or pass `--api-key`).
 
-Collect Massive chains / bars using standalone scripts:
-```bash
-python scripts/fetch_spy_eod_massive.py --start 2024-01-01 --end 2024-12-31 --symbol SPY
-python scripts/collect_eod_chains_massive.py --asof 2026-02-15 --symbol SPY
-```
+`pull-flatfiles` uses Massive's S3-compatible flatfiles endpoint and writes day files under:
+`data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/YYYY/MM/*.csv.gz`.
+Credentials are read from `.env` keys:
+`MASSIVE_FLATFILES_ACCESS_KEY`, `MASSIVE_FLATFILES_SECRET_ACCESS_KEY`,
+`MASSIVE_FLATFILES_ENDPOINT_URL`, `MASSIVE_FLATFILES_BUCKET`, `MASSIVE_FLATFILES_PREFIX`.
 
-Debug/loose trading mode (for plumbing validation):
-```bash
-python -m spygen backtest --checkpoint outputs/checkpoints/flow_latest.pt --config configs/debug_loose.yaml
-```
+## Notes
 
-## Lightweight UI (Model Diagnostics)
-Install UI extras:
-```bash
-python -m pip install -e '.[ui]'
-```
+- Training uses PyTorch with automatic device selection (CUDA/MPS/CPU).
+- The prior experimental numpy trainer was removed; `ivdyn` now has a single PyTorch training path.
+- Architecture is designed to be tradeable/backtestable later via modular execution and strategy hooks.
 
-Launch dashboard (from the same venv used for training):
-```bash
-PYTHONPATH=src .venv/bin/python -m streamlit run src/spygen/ui_app.py
-```
+## Performance Tuning
 
-UI shows:
-- observed repaired surface vs model conditional-mean surface
-- interactive 3D surface view (normalized call or implied vol; observed/model/residual)
-- residual heatmap and tenor slice comparison
-- dropdown-driven cross-sections (tenor slice or moneyness term-structure)
-- per-date log-likelihood / dislocation score
-- static-arbitrage checks on observed and generated samples
-- implied-volatility view: observed IV surface vs model-implied IV surface
-- eval/backtest run summary tables
-- latest backtest diagnostics (`pnl_attribution.json`, `gate_reasons.json`, `execution_summary.json`)
-
-## Backtest Artifacts
-Each backtest run under `outputs/backtests/run_*` writes:
-- `daily.parquet`: daily PnL/equity/turnover
-- `trade_blotter.parquet`: trade-level attribution (`edge_gross_usd`, `edge_net_usd`, `spread_paid`, `fill_slippage`, `fees`, exposure proxies)
-- `pnl_attribution.json`: costs, edge stats, hit rate, tail losses, per-structure decomposition
-- `gate_reasons.json`: aggregated gate reject/accept counters by structure
-- `execution_summary.json`: spread/slippage distributions and spread-gate skip rate
-- `unit_sanity.json`: edge-vs-cost unit check diagnostics
-- `events.jsonl`: structured per-decision events
-- `run_metadata.json`: config snapshot, seed, git SHA
-
-## Project Caveats
-- EOD model only; no intraday microstructure realism.
-- Execution is simplified (bid/ask + slippage heuristic, one-day hold).
-- Synthetic options are for testing and research workflow only.
-- Not financial advice.
+- Dataset build supports parallel day processing:
+  - `ivdyn build-dataset ... --num-workers 0` (`0` = auto)
+- Evaluation supports parallel no-arbitrage diagnostics:
+  - `ivdyn evaluate ... --num-workers 0`
+- Backtest supports:
+  - parallel day simulation via `--num-workers`
+  - batched contract inference via `--inference-batch-size` (default `65536`)
+- UI supports surface overlays and PDF report export (requires `matplotlib`, included in project dependencies).
+- UI includes tabbed layout focused on PnL evidence, interactive 3D/slice surface overlays, prediction errors, training diagnostics, and fit quality.

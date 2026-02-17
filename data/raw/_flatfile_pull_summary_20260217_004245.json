@@ -1,0 +1,1074 @@
+{
+  "source": "massive_flatfiles_s3",
+  "bucket": "flatfiles",
+  "endpoint_url": "https://files.massive.com",
+  "prefix": "flatfiles/us_options_opra/day_aggs_v1",
+  "start_date": "2024-07-01",
+  "end_date": "2024-12-31",
+  "include_weekends": false,
+  "downloaded": 128,
+  "missing": 4,
+  "skipped": 0,
+  "failed": 0,
+  "total_days": 132,
+  "flat_root": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1",
+  "rows": [
+    {
+      "date": "2024-07-01",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-01.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-01.csv.gz",
+      "bytes": 2314360,
+      "error": null
+    },
+    {
+      "date": "2024-07-02",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-02.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-02.csv.gz",
+      "bytes": 2168586,
+      "error": null
+    },
+    {
+      "date": "2024-07-03",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-03.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-03.csv.gz",
+      "bytes": 1908760,
+      "error": null
+    },
+    {
+      "date": "2024-07-04",
+      "status": "missing",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-04.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-04.csv.gz",
+      "bytes": 0,
+      "error": "404: An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-07-05",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-05.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-05.csv.gz",
+      "bytes": 2448827,
+      "error": null
+    },
+    {
+      "date": "2024-07-08",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-08.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-08.csv.gz",
+      "bytes": 2355712,
+      "error": null
+    },
+    {
+      "date": "2024-07-09",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-09.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-09.csv.gz",
+      "bytes": 2267124,
+      "error": null
+    },
+    {
+      "date": "2024-07-10",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-10.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-10.csv.gz",
+      "bytes": 2390769,
+      "error": null
+    },
+    {
+      "date": "2024-07-11",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-11.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-11.csv.gz",
+      "bytes": 2655029,
+      "error": null
+    },
+    {
+      "date": "2024-07-12",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-12.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-12.csv.gz",
+      "bytes": 2675706,
+      "error": null
+    },
+    {
+      "date": "2024-07-15",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-15.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-15.csv.gz",
+      "bytes": 2636198,
+      "error": null
+    },
+    {
+      "date": "2024-07-16",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-16.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-16.csv.gz",
+      "bytes": 2661820,
+      "error": null
+    },
+    {
+      "date": "2024-07-17",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-17.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-17.csv.gz",
+      "bytes": 2795230,
+      "error": null
+    },
+    {
+      "date": "2024-07-18",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-18.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-18.csv.gz",
+      "bytes": 2788315,
+      "error": null
+    },
+    {
+      "date": "2024-07-19",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-19.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-19.csv.gz",
+      "bytes": 2621902,
+      "error": null
+    },
+    {
+      "date": "2024-07-22",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-22.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-22.csv.gz",
+      "bytes": 2475091,
+      "error": null
+    },
+    {
+      "date": "2024-07-23",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-23.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-23.csv.gz",
+      "bytes": 2267601,
+      "error": null
+    },
+    {
+      "date": "2024-07-24",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-24.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-24.csv.gz",
+      "bytes": 2600094,
+      "error": null
+    },
+    {
+      "date": "2024-07-25",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-25.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-25.csv.gz",
+      "bytes": 2743730,
+      "error": null
+    },
+    {
+      "date": "2024-07-26",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-26.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-26.csv.gz",
+      "bytes": 2559097,
+      "error": null
+    },
+    {
+      "date": "2024-07-29",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-29.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-29.csv.gz",
+      "bytes": 2354015,
+      "error": null
+    },
+    {
+      "date": "2024-07-30",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-30.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-30.csv.gz",
+      "bytes": 2425367,
+      "error": null
+    },
+    {
+      "date": "2024-07-31",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/07/2024-07-31.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/07/2024-07-31.csv.gz",
+      "bytes": 2583015,
+      "error": null
+    },
+    {
+      "date": "2024-08-01",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-01.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-01.csv.gz",
+      "bytes": 2889273,
+      "error": null
+    },
+    {
+      "date": "2024-08-02",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-02.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-02.csv.gz",
+      "bytes": 3307349,
+      "error": null
+    },
+    {
+      "date": "2024-08-05",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-05.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-05.csv.gz",
+      "bytes": 2894278,
+      "error": null
+    },
+    {
+      "date": "2024-08-06",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-06.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-06.csv.gz",
+      "bytes": 2746406,
+      "error": null
+    },
+    {
+      "date": "2024-08-07",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-07.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-07.csv.gz",
+      "bytes": 2716422,
+      "error": null
+    },
+    {
+      "date": "2024-08-08",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-08.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-08.csv.gz",
+      "bytes": 2585065,
+      "error": null
+    },
+    {
+      "date": "2024-08-09",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-09.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-09.csv.gz",
+      "bytes": 2437841,
+      "error": null
+    },
+    {
+      "date": "2024-08-12",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-12.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-12.csv.gz",
+      "bytes": 2416210,
+      "error": null
+    },
+    {
+      "date": "2024-08-13",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-13.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-13.csv.gz",
+      "bytes": 2438860,
+      "error": null
+    },
+    {
+      "date": "2024-08-14",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-14.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-14.csv.gz",
+      "bytes": 2307772,
+      "error": null
+    },
+    {
+      "date": "2024-08-15",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-15.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-15.csv.gz",
+      "bytes": 2730498,
+      "error": null
+    },
+    {
+      "date": "2024-08-16",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-16.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-16.csv.gz",
+      "bytes": 2572733,
+      "error": null
+    },
+    {
+      "date": "2024-08-19",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-19.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-19.csv.gz",
+      "bytes": 2562705,
+      "error": null
+    },
+    {
+      "date": "2024-08-20",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-20.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-20.csv.gz",
+      "bytes": 2352295,
+      "error": null
+    },
+    {
+      "date": "2024-08-21",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-21.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-21.csv.gz",
+      "bytes": 2306450,
+      "error": null
+    },
+    {
+      "date": "2024-08-22",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-22.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-22.csv.gz",
+      "bytes": 2320368,
+      "error": null
+    },
+    {
+      "date": "2024-08-23",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-23.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-23.csv.gz",
+      "bytes": 2584848,
+      "error": null
+    },
+    {
+      "date": "2024-08-26",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-26.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-26.csv.gz",
+      "bytes": 2403043,
+      "error": null
+    },
+    {
+      "date": "2024-08-27",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-27.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-27.csv.gz",
+      "bytes": 2186425,
+      "error": null
+    },
+    {
+      "date": "2024-08-28",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-28.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-28.csv.gz",
+      "bytes": 2282695,
+      "error": null
+    },
+    {
+      "date": "2024-08-29",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-29.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-29.csv.gz",
+      "bytes": 2441589,
+      "error": null
+    },
+    {
+      "date": "2024-08-30",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/08/2024-08-30.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/08/2024-08-30.csv.gz",
+      "bytes": 2389499,
+      "error": null
+    },
+    {
+      "date": "2024-09-02",
+      "status": "missing",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-02.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-02.csv.gz",
+      "bytes": 0,
+      "error": "404: An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-09-03",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-03.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-03.csv.gz",
+      "bytes": 2667069,
+      "error": null
+    },
+    {
+      "date": "2024-09-04",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-04.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-04.csv.gz",
+      "bytes": 2356143,
+      "error": null
+    },
+    {
+      "date": "2024-09-05",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-05.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-05.csv.gz",
+      "bytes": 2327999,
+      "error": null
+    },
+    {
+      "date": "2024-09-06",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-06.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-06.csv.gz",
+      "bytes": 2725576,
+      "error": null
+    },
+    {
+      "date": "2024-09-09",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-09.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-09.csv.gz",
+      "bytes": 2351293,
+      "error": null
+    },
+    {
+      "date": "2024-09-10",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-10.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-10.csv.gz",
+      "bytes": 2263748,
+      "error": null
+    },
+    {
+      "date": "2024-09-11",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-11.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-11.csv.gz",
+      "bytes": 2453017,
+      "error": null
+    },
+    {
+      "date": "2024-09-12",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-12.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-12.csv.gz",
+      "bytes": 2465151,
+      "error": null
+    },
+    {
+      "date": "2024-09-13",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-13.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-13.csv.gz",
+      "bytes": 2631430,
+      "error": null
+    },
+    {
+      "date": "2024-09-16",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-16.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-16.csv.gz",
+      "bytes": 2409436,
+      "error": null
+    },
+    {
+      "date": "2024-09-17",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-17.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-17.csv.gz",
+      "bytes": 2467881,
+      "error": null
+    },
+    {
+      "date": "2024-09-18",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-18.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-18.csv.gz",
+      "bytes": 2438007,
+      "error": null
+    },
+    {
+      "date": "2024-09-19",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-19.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-19.csv.gz",
+      "bytes": 2853419,
+      "error": null
+    },
+    {
+      "date": "2024-09-20",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-20.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-20.csv.gz",
+      "bytes": 2691419,
+      "error": null
+    },
+    {
+      "date": "2024-09-23",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-23.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-23.csv.gz",
+      "bytes": 2526801,
+      "error": null
+    },
+    {
+      "date": "2024-09-24",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-24.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-24.csv.gz",
+      "bytes": 2485672,
+      "error": null
+    },
+    {
+      "date": "2024-09-25",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-25.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-25.csv.gz",
+      "bytes": 2341063,
+      "error": null
+    },
+    {
+      "date": "2024-09-26",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-26.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-26.csv.gz",
+      "bytes": 2648580,
+      "error": null
+    },
+    {
+      "date": "2024-09-27",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-27.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-27.csv.gz",
+      "bytes": 2632433,
+      "error": null
+    },
+    {
+      "date": "2024-09-30",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/09/2024-09-30.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/09/2024-09-30.csv.gz",
+      "bytes": 2446908,
+      "error": null
+    },
+    {
+      "date": "2024-10-01",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-01.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-01.csv.gz",
+      "bytes": 2513117,
+      "error": null
+    },
+    {
+      "date": "2024-10-02",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-02.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-02.csv.gz",
+      "bytes": 2343598,
+      "error": null
+    },
+    {
+      "date": "2024-10-03",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-03.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-03.csv.gz",
+      "bytes": 2362794,
+      "error": null
+    },
+    {
+      "date": "2024-10-04",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-04.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-04.csv.gz",
+      "bytes": 2631274,
+      "error": null
+    },
+    {
+      "date": "2024-10-07",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-07.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-07.csv.gz",
+      "bytes": 2559715,
+      "error": null
+    },
+    {
+      "date": "2024-10-08",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-08.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-08.csv.gz",
+      "bytes": 2424793,
+      "error": null
+    },
+    {
+      "date": "2024-10-09",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-09.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-09.csv.gz",
+      "bytes": 2460648,
+      "error": null
+    },
+    {
+      "date": "2024-10-10",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-10.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-10.csv.gz",
+      "bytes": 2394472,
+      "error": null
+    },
+    {
+      "date": "2024-10-11",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-11.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-11.csv.gz",
+      "bytes": 2661902,
+      "error": null
+    },
+    {
+      "date": "2024-10-14",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-14.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-14.csv.gz",
+      "bytes": 2643337,
+      "error": null
+    },
+    {
+      "date": "2024-10-15",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-15.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-15.csv.gz",
+      "bytes": 2688916,
+      "error": null
+    },
+    {
+      "date": "2024-10-16",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-16.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-16.csv.gz",
+      "bytes": 2533043,
+      "error": null
+    },
+    {
+      "date": "2024-10-17",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-17.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-17.csv.gz",
+      "bytes": 2580846,
+      "error": null
+    },
+    {
+      "date": "2024-10-18",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-18.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-18.csv.gz",
+      "bytes": 2773281,
+      "error": null
+    },
+    {
+      "date": "2024-10-21",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-21.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-21.csv.gz",
+      "bytes": 2652630,
+      "error": null
+    },
+    {
+      "date": "2024-10-22",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-22.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-22.csv.gz",
+      "bytes": 2433492,
+      "error": null
+    },
+    {
+      "date": "2024-10-23",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-23.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-23.csv.gz",
+      "bytes": 2557240,
+      "error": null
+    },
+    {
+      "date": "2024-10-24",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-24.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-24.csv.gz",
+      "bytes": 2457511,
+      "error": null
+    },
+    {
+      "date": "2024-10-25",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-25.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-25.csv.gz",
+      "bytes": 2696922,
+      "error": null
+    },
+    {
+      "date": "2024-10-28",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-28.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-28.csv.gz",
+      "bytes": 2580812,
+      "error": null
+    },
+    {
+      "date": "2024-10-29",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-29.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-29.csv.gz",
+      "bytes": 2513405,
+      "error": null
+    },
+    {
+      "date": "2024-10-30",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-30.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-30.csv.gz",
+      "bytes": 2558046,
+      "error": null
+    },
+    {
+      "date": "2024-10-31",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/10/2024-10-31.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/10/2024-10-31.csv.gz",
+      "bytes": 2840615,
+      "error": null
+    },
+    {
+      "date": "2024-11-01",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-01.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-01.csv.gz",
+      "bytes": 2675222,
+      "error": null
+    },
+    {
+      "date": "2024-11-04",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-04.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-04.csv.gz",
+      "bytes": 2555665,
+      "error": null
+    },
+    {
+      "date": "2024-11-05",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-05.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-05.csv.gz",
+      "bytes": 2477718,
+      "error": null
+    },
+    {
+      "date": "2024-11-06",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-06.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-06.csv.gz",
+      "bytes": 3323116,
+      "error": null
+    },
+    {
+      "date": "2024-11-07",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-07.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-07.csv.gz",
+      "bytes": 3139278,
+      "error": null
+    },
+    {
+      "date": "2024-11-08",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-08.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-08.csv.gz",
+      "bytes": 3125127,
+      "error": null
+    },
+    {
+      "date": "2024-11-11",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-11.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-11.csv.gz",
+      "bytes": 3172482,
+      "error": null
+    },
+    {
+      "date": "2024-11-12",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-12.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-12.csv.gz",
+      "bytes": 2930788,
+      "error": null
+    },
+    {
+      "date": "2024-11-13",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-13.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-13.csv.gz",
+      "bytes": 2908774,
+      "error": null
+    },
+    {
+      "date": "2024-11-14",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-14.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-14.csv.gz",
+      "bytes": 2844106,
+      "error": null
+    },
+    {
+      "date": "2024-11-15",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-15.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-15.csv.gz",
+      "bytes": 3195799,
+      "error": null
+    },
+    {
+      "date": "2024-11-18",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-18.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-18.csv.gz",
+      "bytes": 2794446,
+      "error": null
+    },
+    {
+      "date": "2024-11-19",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-19.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-19.csv.gz",
+      "bytes": 2646576,
+      "error": null
+    },
+    {
+      "date": "2024-11-20",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-20.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-20.csv.gz",
+      "bytes": 2583141,
+      "error": null
+    },
+    {
+      "date": "2024-11-21",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-21.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-21.csv.gz",
+      "bytes": 2884879,
+      "error": null
+    },
+    {
+      "date": "2024-11-22",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-22.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-22.csv.gz",
+      "bytes": 2942646,
+      "error": null
+    },
+    {
+      "date": "2024-11-25",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-25.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-25.csv.gz",
+      "bytes": 3037739,
+      "error": null
+    },
+    {
+      "date": "2024-11-26",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-26.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-26.csv.gz",
+      "bytes": 2589458,
+      "error": null
+    },
+    {
+      "date": "2024-11-27",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-27.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-27.csv.gz",
+      "bytes": 2607220,
+      "error": null
+    },
+    {
+      "date": "2024-11-28",
+      "status": "missing",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-28.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-28.csv.gz",
+      "bytes": 0,
+      "error": "404: An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-11-29",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/11/2024-11-29.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/11/2024-11-29.csv.gz",
+      "bytes": 2212423,
+      "error": null
+    },
+    {
+      "date": "2024-12-02",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-02.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-02.csv.gz",
+      "bytes": 2744656,
+      "error": null
+    },
+    {
+      "date": "2024-12-03",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-03.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-03.csv.gz",
+      "bytes": 2513733,
+      "error": null
+    },
+    {
+      "date": "2024-12-04",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-04.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-04.csv.gz",
+      "bytes": 2781856,
+      "error": null
+    },
+    {
+      "date": "2024-12-05",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-05.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-05.csv.gz",
+      "bytes": 2726467,
+      "error": null
+    },
+    {
+      "date": "2024-12-06",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-06.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-06.csv.gz",
+      "bytes": 2880813,
+      "error": null
+    },
+    {
+      "date": "2024-12-09",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-09.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-09.csv.gz",
+      "bytes": 2953969,
+      "error": null
+    },
+    {
+      "date": "2024-12-10",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-10.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-10.csv.gz",
+      "bytes": 2665049,
+      "error": null
+    },
+    {
+      "date": "2024-12-11",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-11.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-11.csv.gz",
+      "bytes": 2725812,
+      "error": null
+    },
+    {
+      "date": "2024-12-12",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-12.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-12.csv.gz",
+      "bytes": 2615266,
+      "error": null
+    },
+    {
+      "date": "2024-12-13",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-13.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-13.csv.gz",
+      "bytes": 2802582,
+      "error": null
+    },
+    {
+      "date": "2024-12-16",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-16.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-16.csv.gz",
+      "bytes": 2899724,
+      "error": null
+    },
+    {
+      "date": "2024-12-17",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-17.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-17.csv.gz",
+      "bytes": 2723880,
+      "error": null
+    },
+    {
+      "date": "2024-12-18",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-18.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-18.csv.gz",
+      "bytes": 3203745,
+      "error": null
+    },
+    {
+      "date": "2024-12-19",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-19.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-19.csv.gz",
+      "bytes": 3211986,
+      "error": null
+    },
+    {
+      "date": "2024-12-20",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-20.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-20.csv.gz",
+      "bytes": 3197518,
+      "error": null
+    },
+    {
+      "date": "2024-12-23",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-23.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-23.csv.gz",
+      "bytes": 2744385,
+      "error": null
+    },
+    {
+      "date": "2024-12-24",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-24.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-24.csv.gz",
+      "bytes": 2084819,
+      "error": null
+    },
+    {
+      "date": "2024-12-25",
+      "status": "missing",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-25.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-25.csv.gz",
+      "bytes": 0,
+      "error": "404: An error occurred (404) when calling the HeadObject operation: Not Found"
+    },
+    {
+      "date": "2024-12-26",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-26.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-26.csv.gz",
+      "bytes": 2509258,
+      "error": null
+    },
+    {
+      "date": "2024-12-27",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-27.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-27.csv.gz",
+      "bytes": 2775359,
+      "error": null
+    },
+    {
+      "date": "2024-12-30",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-30.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-30.csv.gz",
+      "bytes": 2703896,
+      "error": null
+    },
+    {
+      "date": "2024-12-31",
+      "status": "ok",
+      "object_key": "us_options_opra/day_aggs_v1/2024/12/2024-12-31.csv.gz",
+      "local_path": "/Users/abelobsenz/fin_project copy/data/massive_cache/flatfiles/us_options_opra/day_aggs_v1/2024/12/2024-12-31.csv.gz",
+      "bytes": 2460112,
+      "error": null
+    }
+  ],
+  "created_at_utc": "2026-02-17T00:42:45.191300+00:00"
+}

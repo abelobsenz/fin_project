@@ -1,0 +1,17 @@
+{
+  "name": "cfg09_anchor_no_nudges",
+  "price_risk_weight": 0.0,
+  "exec_risk_weight": 0.0,
+  "risk_focus_abs_x": 0.055,
+  "risk_focus_tau_days": 18.0,
+  "exec_label_smoothing": 0.0,
+  "exec_logit_l2": 0.0,
+  "run_dir": "/Users/abelobsenz/fin_project copy/outputs/sweeps_6knob_20260217/runs/run_20260217_041546",
+  "total_pnl": -3126.8663137797266,
+  "max_drawdown_abs": -19861.090869545937,
+  "daily_sharpe": -0.14355894176368134,
+  "win_rate": 0.4738955823293173,
+  "trades": 3984,
+  "price_rmse": 0.0061619165353477,
+  "exec_brier": 0.009803714230656624
+}

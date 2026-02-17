@@ -1,0 +1,16 @@
+{
+  "test_contracts": 29700,
+  "price_rmse": 0.006552884820848703,
+  "price_mae": 0.001635691267438233,
+  "price_r2": 0.9843264222145081,
+  "exec_brier": 0.010507691651582718,
+  "exec_positive_rate": 0.8065993189811707,
+  "surface_iv_rmse": 0.01963355392217636,
+  "surface_iv_mae": 0.013028670102357864,
+  "calendar_violation_obs_mean": 0.004906204994767904,
+  "calendar_violation_pred_mean": 0.0,
+  "butterfly_violation_obs_mean": 0.21398191154003143,
+  "butterfly_violation_pred_mean": 0.19324828684329987,
+  "num_workers": 1,
+  "parallel_backend": "sequential"
+}
