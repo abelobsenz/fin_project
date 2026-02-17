@@ -18,9 +18,10 @@ except Exception as exc:  # pragma: no cover
     raise RuntimeError("PyTorch is required for backtest.") from exc
 
 from ivdyn.model import ModelBundle, device_auto, to_numpy
+from ivdyn.finance import bs_delta
 
-_OPRA_EXPIRY_RE = re.compile(r"^O:[A-Z]+(?P<exp>\d{6})[CP]\d{8}$")
-_BACKTEST_VERSION = "2026-02-17-selector-hedged-v3"
+_OPRA_TICKER_RE = re.compile(r"^O:(?P<underlying>[A-Z]+)(?P<exp>\d{6})[CP]\d{8}$")
+_BACKTEST_VERSION = "2026-02-17-multileg-vertical-deltahedge-v5"
 
 
 @dataclass(slots=True)
@@ -30,6 +31,7 @@ class BacktestConfig:
     device: str | None = None
     num_workers: int = 0
     inference_batch_size: int = 65536
+    initial_capital: float = 10_000.0
 
     fill_gate: float = 0.65
     slippage_bps: float = 7.5
@@ -52,6 +54,35 @@ class BacktestConfig:
     hedge_max_net_delta_abs: float = 0.75
     hedge_max_side_imbalance_ratio: float = 0.25
 
+    # --- Multi-leg support ---
+    #
+    # strategy_mode:
+    #   - "single": current behavior (one option leg per trade).
+    #   - "vertical": attach a same-expiry, further-OTM wing to every option trade
+    #                 to create defined-risk vertical spreads.
+    strategy_mode: str = "single"
+
+    # Vertical spread construction (wing selection)
+    vertical_wing_width_pct_target: float = 0.02
+    vertical_wing_width_pct_min: float = 0.01
+    vertical_wing_width_pct_max: float = 0.08
+    vertical_wing_max_premium_ratio: float = 0.35
+    vertical_wing_fill_gate: float = 0.50
+    vertical_wing_max_rel_spread: float = 0.15
+    vertical_wing_min_moneyness: float = 0.75
+    vertical_wing_max_moneyness: float = 1.30
+    vertical_wing_rich_signal_penalty: float = 0.75
+    vertical_skip_if_no_wing: bool = False
+    vertical_fallback_to_single: bool = True
+
+    # Portfolio hedging (daily close-to-close) using the underlying.
+    # The hedge is sized from BS delta at entry using the day's observed IV surface.
+    hedge_underlying_delta: bool = False
+    hedge_underlying_ratio: float = 1.0
+    hedge_underlying_min_abs_shares: float = 25.0
+    hedge_underlying_max_shares: int = 5000
+    hedge_underlying_slippage_bps: float = 1.0
+
 
 def _load_dataset(path: Path) -> dict[str, np.ndarray]:
     npz = np.load(path, allow_pickle=True)
@@ -69,10 +100,17 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 
 
 def _opra_expiry(symbol: str) -> str:
-    m = _OPRA_EXPIRY_RE.match(str(symbol))
+    m = _OPRA_TICKER_RE.match(str(symbol))
     if not m:
         return ""
     return m.group("exp")
+
+
+def _opra_underlying(symbol: str) -> str:
+    m = _OPRA_TICKER_RE.match(str(symbol))
+    if not m:
+        return ""
+    return m.group("underlying")
 
 
 def _leg_pnl(
@@ -93,6 +131,101 @@ def _leg_pnl(
 def _execution_cost_norm(mid_now: float, rel_spread: float, slippage: float) -> float:
     rel_sp = float(np.clip(rel_spread, 0.0, 3.0))
     return float(mid_now * (slippage + 0.5 * rel_sp * 0.15))
+
+
+def _underlying_pnl(
+    *,
+    spot_now: float,
+    spot_next: float,
+    shares: float,
+    slippage: float,
+) -> float:
+    """Close-to-close PnL for an underlying position.
+
+    shares > 0 means long, shares < 0 means short.
+    slippage is a *relative* cost (e.g., 1 bps = 0.0001).
+    """
+    if not np.isfinite(shares) or shares == 0.0:
+        return 0.0
+    if not np.isfinite(spot_now) or not np.isfinite(spot_next):
+        return 0.0
+    if spot_now <= 0.0 or spot_next <= 0.0:
+        return 0.0
+
+    side = 1.0 if shares > 0 else -1.0
+    sh = float(abs(shares))
+    cost = float(max(slippage, 0.0))
+    entry = float(spot_now * (1.0 + side * cost))
+    exit_ = float(spot_next * (1.0 - side * cost))
+    return float(side * sh * (exit_ - entry))
+
+
+def _interp_surface_bilinear(
+    surface: np.ndarray,
+    *,
+    x_grid: np.ndarray,
+    tenor_days: np.ndarray,
+    x: np.ndarray,
+    dte_days: np.ndarray,
+) -> np.ndarray:
+    """Bilinear interpolation into a surface defined on (x_grid, tenor_days).
+
+    surface has shape (len(x_grid), len(tenor_days)).
+    x and dte_days are broadcastable to the same shape.
+    """
+    x_grid = np.asarray(x_grid, dtype=float)
+    tenor_days = np.asarray(tenor_days, dtype=float)
+    x = np.asarray(x, dtype=float)
+    t = np.asarray(dte_days, dtype=float)
+
+    if surface.ndim != 2:
+        raise ValueError("surface must be 2D")
+    if surface.shape[0] != len(x_grid) or surface.shape[1] != len(tenor_days):
+        raise ValueError("surface shape does not match x_grid/tenor_days")
+
+    nx = len(x_grid)
+    nt = len(tenor_days)
+    if nx < 2 or nt < 2:
+        # Degenerate fallback.
+        return np.full_like(x, float(np.nanmedian(surface)))
+
+    # Clamp to the grid boundaries.
+    x_clamped = np.clip(x, x_grid[0], x_grid[-1])
+    t_clamped = np.clip(t, tenor_days[0], tenor_days[-1])
+
+    ix1 = np.searchsorted(x_grid, x_clamped, side="right")
+    ix1 = np.clip(ix1, 1, nx - 1)
+    ix0 = ix1 - 1
+
+    it1 = np.searchsorted(tenor_days, t_clamped, side="right")
+    it1 = np.clip(it1, 1, nt - 1)
+    it0 = it1 - 1
+
+    x0 = x_grid[ix0]
+    x1 = x_grid[ix1]
+    t0 = tenor_days[it0]
+    t1 = tenor_days[it1]
+
+    wx = (x_clamped - x0) / np.clip(x1 - x0, 1e-12, None)
+    wt = (t_clamped - t0) / np.clip(t1 - t0, 1e-12, None)
+
+    v00 = surface[ix0, it0]
+    v10 = surface[ix1, it0]
+    v01 = surface[ix0, it1]
+    v11 = surface[ix1, it1]
+
+    v0 = v00 + wx * (v10 - v00)
+    v1 = v01 + wx * (v11 - v01)
+    return v0 + wt * (v1 - v0)
+
+
+def _parse_strategy_mode(raw: str) -> str:
+    mode = str(raw or "").strip().lower()
+    if mode in {"single", "1", "one", "one-leg"}:
+        return "single"
+    if mode in {"vertical", "vertical_spread", "spread", "2", "two", "two-leg"}:
+        return "vertical"
+    raise ValueError(f"Unknown strategy_mode={raw!r}; expected 'single' or 'vertical'.")
 
 
 def _write_parquet_with_fallback(df: pd.DataFrame, path: Path) -> None:
@@ -188,6 +321,8 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     dataset_path = cfg.dataset_path.resolve()
     ds = _load_dataset(dataset_path)
 
+    strategy_mode = _parse_strategy_mode(cfg.strategy_mode)
+
     dev = torch.device(cfg.device) if cfg.device else device_auto()
     model_path = run_dir / "model.pt"
     bundle = ModelBundle.load(model_path, device=dev)
@@ -242,9 +377,30 @@ def run_backtest(cfg: BacktestConfig) -> Path:
 
     dates = ds["dates"].astype(str)
     n_dates = len(dates)
+    spot_by_date = ds.get("spot")
+    if spot_by_date is None:
+        spot_by_date = np.full(n_dates, np.nan, dtype=np.float32)
+    spot_by_date = np.asarray(spot_by_date, dtype=np.float32).reshape(-1)
+
+    x_grid = np.asarray(ds.get("x_grid", np.array([], dtype=np.float32)), dtype=np.float32)
+    tenor_days = np.asarray(ds.get("tenor_days", np.array([], dtype=np.int32)), dtype=np.int32)
+    iv_surface_all = ds.get("iv_surface")
 
     date_idx = ds["contract_date_index"].astype(np.int32)
     symbol = ds["contract_symbol"].astype(str)
+    expiry_all = np.array([_opra_expiry(s) for s in symbol], dtype=object)
+    underlying_all = np.array([_opra_underlying(s) for s in symbol], dtype=object)
+    valid_underlying = underlying_all != ""
+    if valid_underlying.any():
+        vals, counts = np.unique(underlying_all[valid_underlying], return_counts=True)
+        underlying_symbol = str(vals[int(np.argmax(counts))])
+        underlying_mask = underlying_all == underlying_symbol
+    else:
+        # Fallback for non-standard symbols: keep options-like rows.
+        underlying_symbol = "UNDERLYING"
+        underlying_mask = np.char.startswith(symbol.astype(str), "O:")
+    if not underlying_mask.any():
+        underlying_mask = np.ones(len(symbol), dtype=bool)
     call_put = ds["contract_call_put"].astype(str)
     dte = ds["contract_dte"].astype(np.int32)
     strike = ds["contract_strike"].astype(np.float32)
@@ -290,7 +446,7 @@ def run_backtest(cfg: BacktestConfig) -> Path:
 
     tradable = (
         (date_idx < (n_dates - 1))
-        & np.char.startswith(symbol.astype(str), "O:SPY")
+        & underlying_mask
         & (dte >= int(cfg.min_dte))
         & (dte <= int(cfg.max_dte))
         & (moneyness >= float(cfg.min_moneyness))
@@ -310,12 +466,16 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     side[long_mask] = "LONG"
     active = side != ""
 
+    active_idx = np.flatnonzero(active).astype(np.int32)
+
     candidates = pd.DataFrame(
         {
+            "contract_idx": active_idx,
             "date_idx": date_idx[active],
             "date": date_arr[active],
             "date_next": date_next_arr[active],
             "symbol": symbol[active],
+            "expiry": expiry_all[active],
             "call_put": call_put[active],
             "strike": strike[active].astype(float),
             "dte": dte[active].astype(int),
@@ -339,6 +499,8 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     keep_cols = [
         "date",
         "date_next",
+        "strategy_mode",
+        "contract_idx",
         "symbol",
         "side",
         "call_put",
@@ -355,6 +517,13 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "fill_prob",
         "tenor_bucket",
         "expiry",
+        "wing_symbol",
+        "wing_strike",
+        "wing_side",
+        "wing_signal",
+        "wing_edge_usd_per_share",
+        "wing_pnl_per_contract",
+        "legs",
         "pnl_per_contract",
         "ev_per_contract",
         "risk_score",
@@ -377,6 +546,9 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     hedge_cp_ratio = float(np.clip(cfg.hedge_max_side_imbalance_ratio, 0.0, 1.0))
     contract_multiplier = 100.0
     trade_rows: list[dict[str, object]] = []
+    leg_rows: list[dict[str, object]] = []
+    hedge_rows: list[dict[str, object]] = []
+    trade_id = 0
     for d in sorted(candidates["date_idx"].unique().tolist()):
         day = candidates[candidates["date_idx"] == d].reset_index(drop=True)
         if day.empty:
@@ -385,6 +557,24 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         day_cap = max(0, int(cfg.max_trades_per_day))
         if day_cap == 0:
             continue
+
+        # Optional multi-leg universe (broader than the alpha-selection universe).
+        wing_universe_idx: np.ndarray | None = None
+        if strategy_mode == "vertical":
+            wing_mask = (
+                (date_idx == int(d))
+                & (date_idx < (n_dates - 1))
+                & underlying_mask
+                & (dte >= int(cfg.min_dte))
+                & (dte <= int(cfg.max_dte))
+                & (moneyness >= float(cfg.vertical_wing_min_moneyness))
+                & (moneyness <= float(cfg.vertical_wing_max_moneyness))
+                & (rel_spread <= float(cfg.vertical_wing_max_rel_spread))
+                & (fill_prob >= float(cfg.vertical_wing_fill_gate))
+                & np.isfinite(mid_next)
+                & (mid_now_norm >= float(cfg.selector_mid_norm_floor) * 0.50)
+            )
+            wing_universe_idx = np.flatnonzero(wing_mask).astype(np.int32)
 
         abs_edge_day = np.abs(day["edge_usd_per_share"].to_numpy(dtype=float))
         edge_cap = float(np.quantile(abs_edge_day, selector_edge_q)) if len(abs_edge_day) else 0.0
@@ -465,15 +655,87 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     break
                 _try_pick(int(i_raw), hedge_ratio_relaxed, cp_imbalance_limit)
 
+        # Build trade structures (1- or 2-leg option positions) and optional daily underlying hedge.
+        day_legs: list[dict[str, object]] = []
+        option_leg_idx: list[int] = []
+        option_leg_side_sign: list[float] = []
+        option_leg_contracts: list[float] = []
+
+        def _pick_vertical_wing(
+            *,
+            anchor_contract_idx: int,
+            anchor_side_lbl: str,
+            anchor_expiry: str,
+            anchor_cp: str,
+            anchor_strike: float,
+            anchor_spot: float,
+            anchor_mid_now: float,
+        ) -> int | None:
+            if wing_universe_idx is None or wing_universe_idx.size == 0:
+                return None
+
+            cp = "C" if str(anchor_cp).upper().startswith("C") else "P"
+            exp = str(anchor_expiry)
+            spot_i = float(anchor_spot)
+            if not np.isfinite(spot_i) or spot_i <= 0.0:
+                return None
+
+            width_tgt = float(cfg.vertical_wing_width_pct_target) * spot_i
+            width_min = float(cfg.vertical_wing_width_pct_min) * spot_i
+            width_max = float(cfg.vertical_wing_width_pct_max) * spot_i
+            width_min = float(max(width_min, 0.0))
+            width_max = float(max(width_max, width_min))
+            target_strike = float(anchor_strike + (width_tgt if cp == "C" else -width_tgt))
+
+            cand = wing_universe_idx
+            same_cp = call_put[cand] == cp
+            same_exp = expiry_all[cand] == exp
+            cand = cand[same_cp & same_exp]
+            if cand.size == 0:
+                return None
+
+            strike_c = strike[cand].astype(float)
+            if cp == "C":
+                keep = (strike_c >= float(anchor_strike + width_min)) & (strike_c <= float(anchor_strike + width_max))
+            else:
+                keep = (strike_c <= float(anchor_strike - width_min)) & (strike_c >= float(anchor_strike - width_max))
+            cand = cand[keep]
+            if cand.size == 0:
+                return None
+
+            strike_c = strike[cand].astype(float)
+            mid_c = mid_now[cand].astype(float)
+            prem_ratio = mid_c / max(float(anchor_mid_now), 1e-12)
+            ok_prem = prem_ratio <= float(cfg.vertical_wing_max_premium_ratio)
+            if not ok_prem.any():
+                return None
+            cand = cand[ok_prem]
+            strike_c = strike_c[ok_prem]
+
+            dist = np.abs(strike_c - target_strike)
+
+            # Prefer wings that do not look "rich" against the model in the direction we are trading.
+            wing_side_lbl = "LONG" if str(anchor_side_lbl) == "SHORT" else "SHORT"
+            wing_is_long = wing_side_lbl == "LONG"
+            wing_signal = edge[cand].astype(float)
+            rich_penalty = np.clip(wing_signal, 0.0, None) if wing_is_long else np.clip(-wing_signal, 0.0, None)
+            score = dist + float(cfg.vertical_wing_rich_signal_penalty) * rich_penalty
+            j = int(np.argmin(score))
+            return int(cand[j])
+
         for i in selected_idx:
             i = int(i)
             side_lbl = str(day.at[i, "side"])
             cp = str(day.at[i, "call_put"])
+            exp = str(day.at[i, "expiry"])
             dte_i = int(day.at[i, "dte"])
             spot_i = float(day.at[i, "spot"])
             if not np.isfinite(spot_i) or spot_i <= 0.0:
                 continue
             notional = float(spot_i * contract_multiplier)
+
+            anchor_contract_idx = int(day.at[i, "contract_idx"])
+            anchor_symbol = str(day.at[i, "symbol"])
 
             main_side = 1 if side_lbl == "LONG" else -1
             mid_now_main = float(day.at[i, "mid_now"])
@@ -484,28 +746,96 @@ def run_backtest(cfg: BacktestConfig) -> Path:
             if not np.isfinite(mid_now_main) or not np.isfinite(mid_next_main):
                 continue
 
-            pnl_per_share = _leg_pnl(
+            pnl_per_share_main = _leg_pnl(
                 mid_now=mid_now_main,
                 mid_next=mid_next_main,
                 rel_spread=rel_sp_main,
                 slippage=slippage,
                 side=main_side,
             )
-            exec_cost_per_share = _execution_cost_norm(mid_now_main, rel_sp_main, slippage)
+            exec_cost_per_share_main = _execution_cost_norm(mid_now_main, rel_sp_main, slippage)
 
-            pnl_per_contract = float(pnl_per_share * contract_multiplier)
+            pnl_per_contract_main = float(pnl_per_share_main * contract_multiplier)
             signal_i = float(day.at[i, "signal"])
             edge_usd_per_share_i = float(day.at[i, "edge_usd_per_share"])
-            ev_per_contract = float(np.abs(edge_usd_per_share_i) * contract_multiplier)
-            execution_cost_per_contract = float(exec_cost_per_share * contract_multiplier)
-            execution_cost_ratio = float(exec_cost_per_share / max(mid_now_main, 1e-12))
+            ev_per_contract_main = float((-main_side * edge_usd_per_share_i) * contract_multiplier)
+            execution_cost_per_contract_main = float(exec_cost_per_share_main * contract_multiplier)
+            execution_cost_ratio_main = float(exec_cost_per_share_main / max(mid_now_main, 1e-12))
             max_fill_distance = float(np.clip(rel_sp_main * 0.25, 0.0, None))
 
+            wing_symbol = ""
+            wing_strike = float("nan")
+            wing_side_lbl = ""
+            wing_signal = float("nan")
+            wing_edge_usd_per_share = float("nan")
+            wing_pnl_per_contract = 0.0
+            legs = 1
+            pnl_per_contract = pnl_per_contract_main
+            ev_per_contract = ev_per_contract_main
+            execution_cost_per_contract = execution_cost_per_contract_main
+            execution_cost_ratio = execution_cost_ratio_main
+
+            wing_contract_idx: int | None = None
+            if strategy_mode == "vertical":
+                wing_contract_idx = _pick_vertical_wing(
+                    anchor_contract_idx=anchor_contract_idx,
+                    anchor_side_lbl=side_lbl,
+                    anchor_expiry=exp,
+                    anchor_cp=cp,
+                    anchor_strike=float(day.at[i, "strike"]),
+                    anchor_spot=spot_i,
+                    anchor_mid_now=mid_now_main,
+                )
+                if wing_contract_idx is None and bool(cfg.vertical_skip_if_no_wing):
+                    continue
+
+            if wing_contract_idx is not None:
+                wing_side_lbl = "LONG" if side_lbl == "SHORT" else "SHORT"
+                wing_side = 1 if wing_side_lbl == "LONG" else -1
+                wing_symbol = str(symbol[wing_contract_idx])
+                wing_strike = float(strike[wing_contract_idx])
+
+                mid_now_w = float(mid_now[wing_contract_idx])
+                mid_next_w = float(mid_next[wing_contract_idx])
+                rel_sp_w = float(rel_spread[wing_contract_idx])
+                if np.isfinite(mid_now_w) and np.isfinite(mid_next_w):
+                    pnl_per_share_w = _leg_pnl(
+                        mid_now=mid_now_w,
+                        mid_next=mid_next_w,
+                        rel_spread=rel_sp_w,
+                        slippage=slippage,
+                        side=wing_side,
+                    )
+                    exec_cost_per_share_w = _execution_cost_norm(mid_now_w, rel_sp_w, slippage)
+
+                    wing_pnl_per_contract = float(pnl_per_share_w * contract_multiplier)
+                    wing_signal = float(edge[wing_contract_idx])
+                    wing_edge_usd_per_share = float(edge_usd_per_share[wing_contract_idx])
+                    ev_per_contract_w = float((-wing_side * wing_edge_usd_per_share) * contract_multiplier)
+                    execution_cost_per_contract_w = float(exec_cost_per_share_w * contract_multiplier)
+                    execution_cost_ratio_w = float(exec_cost_per_share_w / max(mid_now_w, 1e-12))
+
+                    legs = 2
+                    pnl_per_contract = pnl_per_contract_main + wing_pnl_per_contract
+                    ev_per_contract = ev_per_contract_main + ev_per_contract_w
+                    execution_cost_per_contract = execution_cost_per_contract_main + execution_cost_per_contract_w
+                    execution_cost_ratio = float(0.5 * (execution_cost_ratio_main + execution_cost_ratio_w))
+                else:
+                    if bool(cfg.vertical_skip_if_no_wing):
+                        continue
+                    wing_contract_idx = None
+                    wing_symbol = ""
+                    wing_strike = float("nan")
+                    wing_side_lbl = ""
+
+            # Structures (trades.parquet) remain one-row per anchor idea for compatibility.
             trade_rows.append(
                 {
                     "date": str(day.at[i, "date"]),
                     "date_next": str(day.at[i, "date_next"]),
-                    "symbol": str(day.at[i, "symbol"]),
+                    "strategy_mode": strategy_mode,
+                    "contract_idx": anchor_contract_idx,
+                    "symbol": anchor_symbol,
                     "side": side_lbl,
                     "call_put": cp,
                     "strike": float(day.at[i, "strike"]),
@@ -520,10 +850,17 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     "delta_proxy": float(delta_proxy_day[i]),
                     "fill_prob": float(day.at[i, "fill_prob"]),
                     "tenor_bucket": int(_tenor_bucket(dte_i)),
-                    "expiry": _opra_expiry(str(day.at[i, "symbol"])),
+                    "expiry": exp,
+                    "wing_symbol": wing_symbol,
+                    "wing_strike": wing_strike,
+                    "wing_side": wing_side_lbl,
+                    "wing_signal": wing_signal,
+                    "wing_edge_usd_per_share": wing_edge_usd_per_share,
+                    "wing_pnl_per_contract": wing_pnl_per_contract,
+                    "legs": legs,
                     "pnl_per_contract": pnl_per_contract,
                     "ev_per_contract": ev_per_contract,
-                    "risk_score": float(np.abs(edge_usd_per_share_i)),
+                    "risk_score": float(abs(edge_usd_per_share_i)),
                     "execution_cost_per_contract": execution_cost_per_contract,
                     "execution_cost_ratio": execution_cost_ratio,
                     "max_fill_distance": max_fill_distance,
@@ -532,6 +869,189 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     "pnl": pnl_per_contract,
                 }
             )
+
+            # Leg-level log (legs.parquet) for diagnostics and hedging.
+            trade_key = f"{str(day.at[i, 'date'])}_{trade_id:06d}"
+            trade_id += 1
+
+            day_legs.append(
+                {
+                    "trade_key": trade_key,
+                    "date": str(day.at[i, "date"]),
+                    "date_next": str(day.at[i, "date_next"]),
+                    "instrument": "OPTION",
+                    "leg_role": "ANCHOR",
+                    "contract_idx": anchor_contract_idx,
+                    "symbol": anchor_symbol,
+                    "side": side_lbl,
+                    "contracts": 1,
+                    "call_put": cp,
+                    "strike": float(day.at[i, "strike"]),
+                    "dte": dte_i,
+                    "spot": spot_i,
+                    "mid_now": mid_now_main,
+                    "mid_next": mid_next_main,
+                    "rel_spread": rel_sp_main,
+                    "pred_next_norm": float(day.at[i, "pred_next_norm"]),
+                    "signal": signal_i,
+                    "pnl": pnl_per_contract_main,
+                }
+            )
+            option_leg_idx.append(anchor_contract_idx)
+            option_leg_side_sign.append(float(main_side))
+            option_leg_contracts.append(1.0)
+
+            if wing_contract_idx is not None:
+                wing_side_sign = 1 if wing_side_lbl == "LONG" else -1
+                day_legs.append(
+                    {
+                        "trade_key": trade_key,
+                        "date": str(day.at[i, "date"]),
+                        "date_next": str(day.at[i, "date_next"]),
+                        "instrument": "OPTION",
+                        "leg_role": "WING",
+                        "contract_idx": int(wing_contract_idx),
+                        "symbol": wing_symbol,
+                        "side": wing_side_lbl,
+                        "contracts": 1,
+                        "call_put": str(call_put[wing_contract_idx]),
+                        "strike": float(strike[wing_contract_idx]),
+                        "dte": int(dte[wing_contract_idx]),
+                        "spot": float(spot[wing_contract_idx]),
+                        "mid_now": float(mid_now[wing_contract_idx]),
+                        "mid_next": float(mid_next[wing_contract_idx]),
+                        "rel_spread": float(rel_spread[wing_contract_idx]),
+                        "pred_next_norm": float(pred_next_norm[wing_contract_idx]),
+                        "signal": float(edge[wing_contract_idx]),
+                        "pnl": float(wing_pnl_per_contract),
+                    }
+                )
+                option_leg_idx.append(int(wing_contract_idx))
+                option_leg_side_sign.append(float(wing_side_sign))
+                option_leg_contracts.append(1.0)
+
+        # Compute per-leg deltas / IVs (needed for the underlying delta hedge and diagnostics).
+        can_interp = (
+            (iv_surface_all is not None)
+            and isinstance(iv_surface_all, np.ndarray)
+            and (iv_surface_all.ndim == 3)
+            and (x_grid.size >= 2)
+            and (tenor_days.size >= 2)
+            and (0 <= int(d) < iv_surface_all.shape[0])
+        )
+
+        net_option_delta_shares = 0.0
+        if can_interp and option_leg_idx:
+            surf_day = np.asarray(iv_surface_all[int(d)], dtype=float)
+            idx_arr = np.asarray(option_leg_idx, dtype=np.int32)
+            spot_arr = np.asarray(spot[idx_arr], dtype=float)
+            strike_arr = np.asarray(strike[idx_arr], dtype=float)
+            dte_arr = np.asarray(dte[idx_arr], dtype=float)
+            cp_arr = np.asarray(cp_sign[idx_arr], dtype=float)
+
+            x_arr = np.log(np.clip(strike_arr / np.clip(spot_arr, 1e-6, None), 1e-12, None))
+            iv_arr = _interp_surface_bilinear(
+                surf_day,
+                x_grid=x_grid,
+                tenor_days=tenor_days,
+                x=x_arr,
+                dte_days=dte_arr,
+            )
+            iv_fallback = float(np.nanmedian(surf_day)) if np.isfinite(surf_day).any() else 0.20
+            iv_arr = np.where(np.isfinite(iv_arr), iv_arr, iv_fallback)
+            iv_arr = np.clip(iv_arr, 1e-4, 4.0)
+
+            tau_arr = np.clip(dte_arr, 1.0, None) / 365.0
+            delta_arr = bs_delta(
+                spot_arr,
+                strike_arr,
+                tau_arr,
+                iv_arr,
+                cp_arr,
+            )
+
+            side_arr = np.asarray(option_leg_side_sign, dtype=float)
+            contracts_arr = np.asarray(option_leg_contracts, dtype=float)
+            delta_shares = delta_arr * contract_multiplier * side_arr * contracts_arr
+            net_option_delta_shares = float(np.nansum(delta_shares))
+
+            # Write delta and IV back to the corresponding leg dicts.
+            k = 0
+            for leg in day_legs:
+                if str(leg.get("instrument")) != "OPTION":
+                    continue
+                leg["iv"] = float(iv_arr[k])
+                leg["delta"] = float(delta_arr[k])
+                leg["delta_shares"] = float(delta_shares[k])
+                k += 1
+
+        # Optional: delta hedge with the underlying close-to-close.
+        hedge_shares = 0.0
+        hedge_pnl = 0.0
+        if bool(cfg.hedge_underlying_delta) and option_leg_idx:
+            if not can_interp:
+                warnings.warn(
+                    "Underlying delta hedge requested but IV surface grid is unavailable; skipping hedge.",
+                    stacklevel=2,
+                )
+            else:
+                hedge_shares = -float(cfg.hedge_underlying_ratio) * float(net_option_delta_shares)
+                hedge_shares = float(np.round(hedge_shares))
+                if abs(hedge_shares) >= float(cfg.hedge_underlying_min_abs_shares):
+                    hedge_shares = float(
+                        np.clip(
+                            hedge_shares,
+                            -float(cfg.hedge_underlying_max_shares),
+                            float(cfg.hedge_underlying_max_shares),
+                        )
+                    )
+
+                    spot_now_d = float(spot_by_date[int(d)]) if int(d) < len(spot_by_date) else float("nan")
+                    spot_next_d = float(spot_by_date[int(d) + 1]) if int(d) + 1 < len(spot_by_date) else float("nan")
+                    if not np.isfinite(spot_now_d) or spot_now_d <= 0.0:
+                        spot_now_d = float(np.nanmedian(spot[idx_arr])) if option_leg_idx else float("nan")
+                    if not np.isfinite(spot_next_d) or spot_next_d <= 0.0:
+                        spot_next_d = float(spot_now_d)
+
+                    hedge_slip = float(cfg.hedge_underlying_slippage_bps) / 1e4
+                    hedge_pnl = _underlying_pnl(
+                        spot_now=spot_now_d,
+                        spot_next=spot_next_d,
+                        shares=hedge_shares,
+                        slippage=hedge_slip,
+                    )
+
+                    day_legs.append(
+                        {
+                            "trade_key": f"HEDGE_{str(day.at[0, 'date'])}",
+                            "date": str(day.at[0, "date"]),
+                            "date_next": str(day.at[0, "date_next"]),
+                            "instrument": "UNDERLYING",
+                            "leg_role": "DELTA_HEDGE",
+                            "contract_idx": -1,
+                            "symbol": underlying_symbol,
+                            "side": "LONG" if hedge_shares > 0 else "SHORT",
+                            "shares": float(abs(hedge_shares)),
+                            "spot_now": spot_now_d,
+                            "spot_next": spot_next_d,
+                            "pnl": float(hedge_pnl),
+                            "delta": 1.0,
+                            "delta_shares": float(hedge_shares),
+                        }
+                    )
+
+        hedge_rows.append(
+            {
+                "date": str(day.at[0, "date"]),
+                "date_next": str(day.at[0, "date_next"]),
+                "net_option_delta_shares": float(net_option_delta_shares),
+                "hedge_shares": float(hedge_shares),
+                "post_hedge_delta_shares": float(net_option_delta_shares + hedge_shares),
+                "hedge_pnl": float(hedge_pnl),
+            }
+        )
+
+        leg_rows.extend(day_legs)
 
     if trade_rows:
         trades = (
@@ -543,17 +1063,37 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         trades = pd.DataFrame(columns=keep_cols)
 
     all_days = pd.DataFrame({"date": dates[:-1]})
+
+    hedge_df = pd.DataFrame(hedge_rows) if hedge_rows else pd.DataFrame(
+        columns=["date", "date_next", "net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares", "hedge_pnl"]
+    )
+    hedge_by_day = (
+        hedge_df.groupby("date", as_index=False).agg(
+            hedge_pnl=("hedge_pnl", "sum"),
+            net_option_delta_shares=("net_option_delta_shares", "sum"),
+            hedge_shares=("hedge_shares", "sum"),
+            post_hedge_delta_shares=("post_hedge_delta_shares", "sum"),
+        )
+        if not hedge_df.empty
+        else pd.DataFrame(columns=["date", "hedge_pnl", "net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares"])
+    )
+
     if trades.empty:
         daily = all_days.copy()
+        daily["options_pnl"] = 0.0
+        daily["hedge_pnl"] = 0.0
         daily["pnl"] = 0.0
         daily["trades"] = 0
         daily["net_delta_proxy"] = 0.0
         daily["gross_delta_proxy"] = 0.0
         daily["side_imbalance"] = 0.0
         daily["cp_imbalance"] = 0.0
+        daily["net_option_delta_shares"] = 0.0
+        daily["hedge_shares"] = 0.0
+        daily["post_hedge_delta_shares"] = 0.0
     else:
-        daily = trades.groupby("date", as_index=False).agg(pnl=("pnl", "sum"), trades=("pnl", "size"))
-        hedge_daily = trades.groupby("date", as_index=False).agg(
+        opt_daily = trades.groupby("date", as_index=False).agg(options_pnl=("pnl", "sum"), trades=("pnl", "size"))
+        hedge_proxy = trades.groupby("date", as_index=False).agg(
             net_delta_proxy=("delta_proxy", "sum"),
             gross_delta_proxy=("delta_proxy", lambda s: float(np.abs(s).sum())),
             long_trades=("side", lambda s: int((s == "LONG").sum())),
@@ -561,21 +1101,31 @@ def run_backtest(cfg: BacktestConfig) -> Path:
             call_trades=("call_put", lambda s: int((s == "C").sum())),
             put_trades=("call_put", lambda s: int((s == "P").sum())),
         )
-        hedge_daily["side_imbalance"] = (hedge_daily["long_trades"] - hedge_daily["short_trades"]).abs().astype(float)
-        hedge_daily["cp_imbalance"] = (hedge_daily["call_trades"] - hedge_daily["put_trades"]).abs().astype(float)
-        daily = all_days.merge(daily, on="date", how="left")
+        hedge_proxy["side_imbalance"] = (hedge_proxy["long_trades"] - hedge_proxy["short_trades"]).abs().astype(float)
+        hedge_proxy["cp_imbalance"] = (hedge_proxy["call_trades"] - hedge_proxy["put_trades"]).abs().astype(float)
+
+        daily = all_days.merge(opt_daily, on="date", how="left")
+        daily = daily.merge(hedge_by_day, on="date", how="left")
         daily = daily.merge(
-            hedge_daily[["date", "net_delta_proxy", "gross_delta_proxy", "side_imbalance", "cp_imbalance"]],
+            hedge_proxy[["date", "net_delta_proxy", "gross_delta_proxy", "side_imbalance", "cp_imbalance"]],
             on="date",
             how="left",
         )
-        daily["pnl"] = pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0)
-        daily["trades"] = pd.to_numeric(daily["trades"], errors="coerce").fillna(0).astype(int)
-        daily["net_delta_proxy"] = pd.to_numeric(daily["net_delta_proxy"], errors="coerce").fillna(0.0)
-        daily["gross_delta_proxy"] = pd.to_numeric(daily["gross_delta_proxy"], errors="coerce").fillna(0.0)
-        daily["side_imbalance"] = pd.to_numeric(daily["side_imbalance"], errors="coerce").fillna(0.0)
-        daily["cp_imbalance"] = pd.to_numeric(daily["cp_imbalance"], errors="coerce").fillna(0.0)
-    daily["equity"] = pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0).cumsum()
+
+        daily["options_pnl"] = pd.to_numeric(daily.get("options_pnl"), errors="coerce").fillna(0.0)
+        daily["hedge_pnl"] = pd.to_numeric(daily.get("hedge_pnl"), errors="coerce").fillna(0.0)
+        daily["pnl"] = daily["options_pnl"] + daily["hedge_pnl"]
+        daily["trades"] = pd.to_numeric(daily.get("trades"), errors="coerce").fillna(0).astype(int)
+        daily["net_delta_proxy"] = pd.to_numeric(daily.get("net_delta_proxy"), errors="coerce").fillna(0.0)
+        daily["gross_delta_proxy"] = pd.to_numeric(daily.get("gross_delta_proxy"), errors="coerce").fillna(0.0)
+        daily["side_imbalance"] = pd.to_numeric(daily.get("side_imbalance"), errors="coerce").fillna(0.0)
+        daily["cp_imbalance"] = pd.to_numeric(daily.get("cp_imbalance"), errors="coerce").fillna(0.0)
+        daily["net_option_delta_shares"] = pd.to_numeric(daily.get("net_option_delta_shares"), errors="coerce").fillna(0.0)
+        daily["hedge_shares"] = pd.to_numeric(daily.get("hedge_shares"), errors="coerce").fillna(0.0)
+        daily["post_hedge_delta_shares"] = pd.to_numeric(daily.get("post_hedge_delta_shares"), errors="coerce").fillna(0.0)
+
+    initial_capital = float(cfg.initial_capital)
+    daily["equity"] = initial_capital + pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0).cumsum()
 
     pnl = daily["pnl"].astype(float)
     equity = daily["equity"].astype(float)
@@ -598,10 +1148,16 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "backtest_version": _BACKTEST_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "dataset_path": dataset_path.as_posix(),
+        "underlying_symbol": underlying_symbol,
+        "strategy_mode": strategy_mode,
         "days": int(len(daily)),
         "candidates": int(len(candidates)),
         "trades": int(len(trades)),
+        "initial_capital": initial_capital,
+        "final_equity": float(equity.iloc[-1]) if len(equity) else initial_capital,
         "total_pnl": float(pnl.sum()),
+        "total_options_pnl": float(daily.get("options_pnl", pd.Series(dtype=float)).sum()),
+        "total_hedge_pnl": float(daily.get("hedge_pnl", pd.Series(dtype=float)).sum()),
         "avg_daily_pnl": daily_mean,
         "daily_vol_pnl": daily_vol,
         "daily_sharpe": daily_sharpe,
@@ -621,6 +1177,15 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "min_moneyness": float(cfg.min_moneyness),
         "max_moneyness": float(cfg.max_moneyness),
         "max_rel_spread": float(cfg.max_rel_spread),
+        "vertical_wing_width_pct_target": float(cfg.vertical_wing_width_pct_target),
+        "vertical_wing_width_pct_min": float(cfg.vertical_wing_width_pct_min),
+        "vertical_wing_width_pct_max": float(cfg.vertical_wing_width_pct_max),
+        "vertical_wing_max_premium_ratio": float(cfg.vertical_wing_max_premium_ratio),
+        "vertical_wing_fill_gate": float(cfg.vertical_wing_fill_gate),
+        "vertical_wing_max_rel_spread": float(cfg.vertical_wing_max_rel_spread),
+        "vertical_wing_min_moneyness": float(cfg.vertical_wing_min_moneyness),
+        "vertical_wing_max_moneyness": float(cfg.vertical_wing_max_moneyness),
+        "vertical_skip_if_no_wing": bool(cfg.vertical_skip_if_no_wing),
         "hedge_max_net_delta_ratio": float(cfg.hedge_max_net_delta_ratio),
         "hedge_relaxed_net_delta_ratio": float(cfg.hedge_relaxed_net_delta_ratio),
         "hedge_max_net_delta_abs": float(cfg.hedge_max_net_delta_abs),
@@ -630,6 +1195,14 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "hedge_avg_gross_delta_proxy": float(hedge_gross.mean()) if len(hedge_gross) else 0.0,
         "hedge_avg_side_imbalance": float(hedge_side_imb.mean()) if len(hedge_side_imb) else 0.0,
         "hedge_avg_cp_imbalance": float(hedge_cp_imb.mean()) if len(hedge_cp_imb) else 0.0,
+        "hedge_underlying_delta": bool(cfg.hedge_underlying_delta),
+        "hedge_underlying_ratio": float(cfg.hedge_underlying_ratio),
+        "hedge_underlying_min_abs_shares": float(cfg.hedge_underlying_min_abs_shares),
+        "hedge_underlying_max_shares": int(cfg.hedge_underlying_max_shares),
+        "hedge_underlying_slippage_bps": float(cfg.hedge_underlying_slippage_bps),
+        "hedge_avg_abs_net_option_delta_shares": float(daily.get("net_option_delta_shares", pd.Series(dtype=float)).abs().mean()),
+        "hedge_avg_abs_post_hedge_delta_shares": float(daily.get("post_hedge_delta_shares", pd.Series(dtype=float)).abs().mean()),
+        "hedge_avg_abs_hedge_shares": float(daily.get("hedge_shares", pd.Series(dtype=float)).abs().mean()),
         "slippage_bps": float(cfg.slippage_bps),
         "signal_abs_gate": float(cfg.signal_abs_gate),
         "num_workers": int(cfg.num_workers),
@@ -637,7 +1210,15 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "inference_batch_size": int(cfg.inference_batch_size),
     }
 
+    legs_df = pd.DataFrame(leg_rows) if leg_rows else pd.DataFrame()
+    if not legs_df.empty:
+        sort_cols = [c for c in ["date", "trade_key", "leg_role", "instrument"] if c in legs_df.columns]
+        if sort_cols:
+            legs_df = legs_df.sort_values(sort_cols).reset_index(drop=True)
+
     _write_parquet_with_fallback(trades, bt_dir / "trades.parquet")
     _write_parquet_with_fallback(daily, bt_dir / "daily.parquet")
+    _write_parquet_with_fallback(legs_df, bt_dir / "legs.parquet")
+    _write_parquet_with_fallback(hedge_df, bt_dir / "hedges.parquet")
     (bt_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return bt_dir

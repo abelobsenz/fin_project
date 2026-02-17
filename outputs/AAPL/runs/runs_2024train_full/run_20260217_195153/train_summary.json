@@ -1,0 +1,6 @@
+{
+  "model_path": "outputs/AAPL/runs/runs_2024train_full/run_20260217_195153/model.pt",
+  "dataset_path": "/Users/abelobsenz/fin_project copy/outputs/AAPL/datasets/dataset_train_2024_full/dataset.npz",
+  "device": "mps",
+  "final_val_recon": 0.239054337143898
+}

@@ -31,19 +31,78 @@ def _load_dataset(path: Path) -> dict[str, np.ndarray]:
     return out
 
 
-def _load_split(run_dir: Path, n_dates: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    split = run_dir / "split_info.json"
-    if split.exists():
-        payload = json.loads(split.read_text(encoding="utf-8"))
-        return (
-            np.asarray(payload["train_date_idx"], dtype=np.int32),
-            np.asarray(payload["val_date_idx"], dtype=np.int32),
-            np.asarray(payload["test_date_idx"], dtype=np.int32),
-        )
-
+def _default_split(n_dates: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     i_train = int(n_dates * 0.7)
     i_val = int(n_dates * 0.85)
     return np.arange(i_train), np.arange(i_train, i_val), np.arange(i_val, n_dates)
+
+
+def _sanitize_split_idx(raw: object, n_dates: int) -> np.ndarray:
+    arr = np.asarray(raw, dtype=np.int32).reshape(-1)
+    if arr.size == 0:
+        return arr
+    arr = arr[(arr >= 0) & (arr < int(n_dates))]
+    if arr.size == 0:
+        return arr
+    return np.unique(arr.astype(np.int32))
+
+
+def _disjoint_splits(
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    test_idx: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    test_idx = np.unique(test_idx.astype(np.int32))
+    val_idx = np.unique(val_idx.astype(np.int32))
+    val_idx = val_idx[~np.isin(val_idx, test_idx)]
+    train_idx = np.unique(train_idx.astype(np.int32))
+    train_idx = train_idx[(~np.isin(train_idx, test_idx)) & (~np.isin(train_idx, val_idx))]
+    return train_idx, val_idx, test_idx
+
+
+def _load_split(
+    run_dir: Path,
+    n_dates: int,
+    dates: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
+    split = run_dir / "split_info.json"
+    if not split.exists():
+        tr, va, te = _default_split(n_dates)
+        return tr, va, te, "default_no_split_info"
+
+    try:
+        payload = json.loads(split.read_text(encoding="utf-8"))
+    except Exception:
+        tr, va, te = _default_split(n_dates)
+        return tr, va, te, "default_split_read_error"
+
+    train_raw = np.asarray(payload.get("train_date_idx", []), dtype=np.int32).reshape(-1)
+    val_raw = np.asarray(payload.get("val_date_idx", []), dtype=np.int32).reshape(-1)
+    test_raw = np.asarray(payload.get("test_date_idx", []), dtype=np.int32).reshape(-1)
+
+    train_idx = _sanitize_split_idx(train_raw, n_dates)
+    val_idx = _sanitize_split_idx(val_raw, n_dates)
+    test_idx = _sanitize_split_idx(test_raw, n_dates)
+    train_idx, val_idx, test_idx = _disjoint_splits(train_idx, val_idx, test_idx)
+
+    orig_total = int(train_raw.size + val_raw.size + test_raw.size)
+    kept_total = int(train_idx.size + val_idx.size + test_idx.size)
+    if orig_total > 0 and kept_total == orig_total:
+        return train_idx, val_idx, test_idx, "split_info_idx"
+
+    # Cross-dataset evaluation can have different n_dates than training.
+    # When available, map split by date labels from split_info to current dataset dates.
+    date_to_idx = {str(d): i for i, d in enumerate(np.asarray(dates).astype(str))}
+    if date_to_idx:
+        tr_d = _sanitize_split_idx([date_to_idx[d] for d in payload.get("train_dates", []) if d in date_to_idx], n_dates)
+        va_d = _sanitize_split_idx([date_to_idx[d] for d in payload.get("val_dates", []) if d in date_to_idx], n_dates)
+        te_d = _sanitize_split_idx([date_to_idx[d] for d in payload.get("test_dates", []) if d in date_to_idx], n_dates)
+        tr_d, va_d, te_d = _disjoint_splits(tr_d, va_d, te_d)
+        if int(tr_d.size + va_d.size + te_d.size) > 0:
+            return tr_d, va_d, te_d, "split_info_dates_mapped"
+
+    tr, va, te = _default_split(n_dates)
+    return tr, va, te, "default_split_mismatch"
 
 
 def _resolve_num_workers(requested: int, n_tasks: int) -> int:
@@ -108,7 +167,7 @@ def evaluate(
     contract_spot = ds["contract_spot"].astype(np.float32)
     contract_mid_norm = contract_mid / np.clip(contract_spot, 1e-6, None)
 
-    train_dates, val_dates, test_dates = _load_split(run_dir, n_dates)
+    train_dates, val_dates, test_dates, split_source = _load_split(run_dir, n_dates, dates)
 
     with torch.no_grad():
         sf = torch.as_tensor(surface_scaled, dtype=torch.float32, device=dev)
@@ -143,7 +202,9 @@ def evaluate(
         "test_contracts": int(mask_test_contracts.sum()),
         "price_rmse": rmse(y_pred, y_true),
         "price_mae": mae(y_pred, y_true),
-        "price_r2": r2(y_pred, y_true),
+        "price_r2_same_day": r2(y_pred, y_true),
+        # Expose primary R^2 as next-day predictive quality.
+        "price_r2": float("nan"),
         "exec_brier": brier_score(e_prob, e_true),
         "exec_positive_rate": float(np.mean(e_true)) if len(e_true) else float("nan"),
     }
@@ -172,6 +233,8 @@ def evaluate(
         metrics["next_price_rmse"] = rmse(y_next_pred, y_next_true)
         metrics["next_price_mae"] = mae(y_next_pred, y_next_true)
         metrics["next_price_r2"] = r2(y_next_pred, y_next_true)
+        metrics["price_r2"] = metrics["next_price_r2"]
+        metrics["price_r2_source"] = "next_day"
         metrics["next_return_directional_acc"] = float(np.mean(np.sign(r_next_pred) == np.sign(r_next_true)))
         metrics["next_return_corr"] = float(np.corrcoef(r_next_pred, r_next_true)[0, 1]) if len(r_next_true) > 1 else float("nan")
     else:
@@ -179,6 +242,9 @@ def evaluate(
         metrics["next_price_rmse"] = float("nan")
         metrics["next_price_mae"] = float("nan")
         metrics["next_price_r2"] = float("nan")
+        # Fallback for edge cases where no next-day targets are available.
+        metrics["price_r2"] = metrics["price_r2_same_day"]
+        metrics["price_r2_source"] = "same_day_fallback"
         metrics["next_return_directional_acc"] = float("nan")
         metrics["next_return_corr"] = float("nan")
 
@@ -223,6 +289,7 @@ def evaluate(
     metrics["calendar_violation_pred_mean"] = float(np.mean(cal_pred)) if len(cal_pred) else float("nan")
     metrics["butterfly_violation_obs_mean"] = float(np.mean(bfly_obs)) if len(bfly_obs) else float("nan")
     metrics["butterfly_violation_pred_mean"] = float(np.mean(bfly_pred)) if len(bfly_pred) else float("nan")
+    metrics["split_source"] = split_source
     metrics["num_workers"] = workers
     metrics["parallel_backend"] = parallel_backend
 

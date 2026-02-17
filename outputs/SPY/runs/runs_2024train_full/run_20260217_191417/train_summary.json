@@ -1,0 +1,6 @@
+{
+  "model_path": "outputs/SPY/runs/runs_2024train_full/run_20260217_191417/model.pt",
+  "dataset_path": "/Users/abelobsenz/fin_project copy/outputs/SPY/datasets/dataset_train_2024_full/dataset.npz",
+  "device": "mps",
+  "final_val_recon": 0.38015660643577576
+}

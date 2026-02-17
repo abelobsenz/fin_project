@@ -123,7 +123,10 @@ def _compute_backtest_stats(daily: pd.DataFrame, trades: pd.DataFrame, bt_summar
         return stats
 
     pnl = pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0)
-    equity = pnl.cumsum()
+    if "equity" in daily.columns:
+        equity = pd.to_numeric(daily["equity"], errors="coerce").fillna(0.0)
+    else:
+        equity = pnl.cumsum()
     peak = equity.cummax().replace(0.0, np.nan)
     drawdown = (equity - peak) / peak
 
@@ -398,6 +401,25 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
             daily["equity"] = pd.to_numeric(daily["equity"], errors="coerce").fillna(0.0)
         else:
             daily["equity"] = daily["pnl"].cumsum()
+        if "options_pnl" in daily.columns:
+            daily["options_pnl"] = pd.to_numeric(daily["options_pnl"], errors="coerce").fillna(0.0)
+        else:
+            daily["options_pnl"] = 0.0
+        if "hedge_pnl" in daily.columns:
+            daily["hedge_pnl"] = pd.to_numeric(daily["hedge_pnl"], errors="coerce").fillna(0.0)
+        else:
+            daily["hedge_pnl"] = 0.0
+        for c in ("net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares"):
+            if c in daily.columns:
+                daily[c] = pd.to_numeric(daily[c], errors="coerce").fillna(0.0)
+            else:
+                daily[c] = 0.0
+        abs_net_delta = daily["net_option_delta_shares"].abs()
+        abs_post_hedge_delta = daily["post_hedge_delta_shares"].abs()
+        denom = abs_net_delta.replace(0.0, np.nan)
+        daily["hedge_risk_reduction_pct"] = (
+            ((abs_net_delta - abs_post_hedge_delta) / denom) * 100.0
+        ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         peak = daily["equity"].cummax().replace(0.0, np.nan)
         daily["drawdown"] = (daily["equity"] - peak) / peak
     bt_stats = _compute_backtest_stats(daily, trades, bt_summary) if not daily.empty else {}
@@ -497,7 +519,7 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
         kpi_rows = [
             ("Prediction", "Price RMSE", metrics.get("price_rmse")),
             ("Prediction", "Price MAE", metrics.get("price_mae")),
-            ("Prediction", "Price R2", metrics.get("price_r2")),
+            ("Prediction", "Next-Day Price R2", metrics.get("next_price_r2", metrics.get("price_r2"))),
             ("Prediction", "Exec Brier", metrics.get("exec_brier")),
             ("Surface", "Surface RMSE", metrics.get("surface_iv_rmse")),
             ("Surface", "Surface MAE", metrics.get("surface_iv_mae")),
@@ -508,6 +530,14 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
             ("Backtest", "Max Drawdown", bt_stats.get("max_drawdown", bt_summary.get("max_drawdown"))),
             ("Backtest", "Profit Factor", bt_stats.get("profit_factor")),
             ("Backtest", "Trades", bt_stats.get("trades", bt_summary.get("trades"))),
+            ("Backtest", "Options PnL", float(daily["options_pnl"].sum()) if not daily.empty else np.nan),
+            ("Backtest", "Hedge PnL", float(daily["hedge_pnl"].sum()) if not daily.empty else np.nan),
+            (
+                "Backtest",
+                "Avg Hedge Risk Reduction (%)",
+                float(daily["hedge_risk_reduction_pct"].mean()) if not daily.empty else np.nan,
+            ),
+            ("Backtest", "Avg |Hedge Shares|", float(daily["hedge_shares"].abs().mean()) if not daily.empty else np.nan),
             ("Prediction", "Median |Error|", pred_stats.get("median_abs_error")),
             ("Prediction", "P95 |Error|", pred_stats.get("p95_abs_error")),
         ]
@@ -574,19 +604,74 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
-        # Page 3: backtest numeric evidence
+        # Page 3: hedge diagnostics
+        if not daily.empty:
+            fig, axes = plt.subplots(2, 2, figsize=(11, 8.2))
+            fig.suptitle("Hedge Diagnostics", fontsize=14)
+
+            hedge_colors = np.where(daily["hedge_shares"] >= 0.0, "#0f766e", "#b91c1c")
+            axes[0, 0].bar(daily["date"], daily["hedge_shares"], color=hedge_colors, width=1.6)
+            axes[0, 0].set_title("Hedge Amount Per Day (Shares)")
+            axes[0, 0].set_ylabel("Shares")
+
+            axes[0, 1].plot(daily["date"], daily["net_option_delta_shares"], label="Net option delta", color="#0f766e")
+            axes[0, 1].plot(daily["date"], daily["post_hedge_delta_shares"], label="Post-hedge delta", color="#111827")
+            axes[0, 1].set_title("Delta Exposure (Shares)")
+            axes[0, 1].set_ylabel("Shares")
+            axes[0, 1].legend(fontsize=8)
+
+            axes[1, 0].bar(daily["date"], daily["hedge_pnl"], color="#d97706", alpha=0.7, width=1.6, label="Hedge PnL")
+            ax2 = axes[1, 0].twinx()
+            ax2.plot(daily["date"], daily["hedge_risk_reduction_pct"], color="#111827", linewidth=1.5, label="Risk reduction %")
+            axes[1, 0].set_title("Hedge Contribution to PnL and Risk Reduction")
+            axes[1, 0].set_ylabel("Hedge PnL")
+            ax2.set_ylabel("Risk Reduction (%)")
+            h1, l1 = axes[1, 0].get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            axes[1, 0].legend(h1 + h2, l1 + l2, fontsize=8, loc="best")
+
+            axes[1, 1].hist(daily["hedge_risk_reduction_pct"].to_numpy(), bins=40, color="#334155", alpha=0.85)
+            axes[1, 1].set_title("Risk Reduction Distribution")
+            axes[1, 1].set_xlabel("Risk Reduction (%)")
+
+            for ax in axes.ravel():
+                ax.tick_params(axis="x", labelrotation=30)
+            fig.tight_layout()
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+
+        # Page 4: backtest numeric evidence
         fig = plt.figure(figsize=(11, 8.5))
-        gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 1.0])
+        gs = fig.add_gridspec(3, 1, height_ratios=[1.0, 1.0, 0.9])
         ax0 = fig.add_subplot(gs[0, 0])
         ax1 = fig.add_subplot(gs[1, 0])
+        ax2 = fig.add_subplot(gs[2, 0])
         _render_pdf_table(ax0, "Daily PnL Summary", daily_desc)
         _render_pdf_table(ax1, "Trade Group Diagnostics (side x call_put)", grouped_trades)
+        hedge_summary_rows: list[dict[str, object]] = []
+        if not daily.empty:
+            total_pnl = float(daily["pnl"].sum())
+            hedge_total = float(daily["hedge_pnl"].sum())
+            hedge_summary_rows = [
+                {"metric": "options_pnl_total", "value": float(daily["options_pnl"].sum())},
+                {"metric": "hedge_pnl_total", "value": hedge_total},
+                {
+                    "metric": "hedge_pnl_pct_of_total",
+                    "value": (100.0 * hedge_total / total_pnl) if abs(total_pnl) > 1e-12 else np.nan,
+                },
+                {"metric": "avg_abs_hedge_shares", "value": float(daily["hedge_shares"].abs().mean())},
+                {"metric": "avg_abs_net_option_delta_shares", "value": float(daily["net_option_delta_shares"].abs().mean())},
+                {"metric": "avg_abs_post_hedge_delta_shares", "value": float(daily["post_hedge_delta_shares"].abs().mean())},
+                {"metric": "avg_hedge_risk_reduction_pct", "value": float(daily["hedge_risk_reduction_pct"].mean())},
+                {"metric": "median_hedge_risk_reduction_pct", "value": float(daily["hedge_risk_reduction_pct"].median())},
+            ]
+        _render_pdf_table(ax2, "Hedge Summary", pd.DataFrame(hedge_summary_rows))
         fig.suptitle("Backtest Numeric Evidence", fontsize=14)
         fig.tight_layout()
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
-        # Page 4: surface overlays (heatmaps + slices)
+        # Page 5: surface overlays (heatmaps + slices)
         if obs is not None and pred_surface is not None and x_grid is not None and tenor_days is not None and surf_dates is not None:
             i = len(obs) - 1
             err = pred_surface[i] - obs[i]
@@ -645,7 +730,7 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
-        # Page 5: prediction error charts
+        # Page 6: prediction error charts
         if not pred_test.empty:
             sample = pred_test.sample(min(len(pred_test), 8000), random_state=7)
             fig, axes = plt.subplots(1, 3, figsize=(14, 4.8))
@@ -685,7 +770,7 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
-        # Page 6: training diagnostics charts
+        # Page 7: training diagnostics charts
         if not hist.empty and "stage" in hist.columns and "epoch" in hist.columns:
             hist = hist.copy()
             hist["epoch"] = pd.to_numeric(hist["epoch"], errors="coerce")
@@ -749,7 +834,7 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
-        # Page 7: fits diagnostics
+        # Page 8: fits diagnostics
         if not fit_df.empty or not noarb.empty:
             fig, axes = plt.subplots(2, 1, figsize=(11, 8.2))
             fig.suptitle("Fit Diagnostics", fontsize=14)
@@ -783,7 +868,7 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
-        # Page 8: raw report payloads
+        # Page 9: raw report payloads
         payload = {
             "train_summary": train_summary,
             "train_config": cfg,
@@ -832,6 +917,25 @@ def _render_backtest_tab(bt_dir: Path) -> None:
     daily["date"] = pd.to_datetime(daily["date"])
     daily["pnl"] = pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0)
     daily["equity"] = pd.to_numeric(daily["equity"], errors="coerce").fillna(0.0)
+    if "options_pnl" in daily.columns:
+        daily["options_pnl"] = pd.to_numeric(daily["options_pnl"], errors="coerce").fillna(0.0)
+    else:
+        daily["options_pnl"] = 0.0
+    if "hedge_pnl" in daily.columns:
+        daily["hedge_pnl"] = pd.to_numeric(daily["hedge_pnl"], errors="coerce").fillna(0.0)
+    else:
+        daily["hedge_pnl"] = 0.0
+    for c in ("net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares"):
+        if c in daily.columns:
+            daily[c] = pd.to_numeric(daily[c], errors="coerce").fillna(0.0)
+        else:
+            daily[c] = 0.0
+    abs_net_delta = daily["net_option_delta_shares"].abs()
+    abs_post_hedge_delta = daily["post_hedge_delta_shares"].abs()
+    denom = abs_net_delta.replace(0.0, np.nan)
+    daily["hedge_risk_reduction_pct"] = (
+        ((abs_net_delta - abs_post_hedge_delta) / denom) * 100.0
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     peak = daily["equity"].cummax().replace(0.0, np.nan)
     daily["drawdown"] = (daily["equity"] - peak) / peak
@@ -903,6 +1007,65 @@ def _render_backtest_tab(bt_dir: Path) -> None:
 
     daily_desc = daily["pnl"].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).to_frame("daily_pnl")
     st.dataframe(daily_desc, use_container_width=True)
+
+    st.markdown("#### Hedge Diagnostics")
+    h1, h2, h3 = st.columns(3)
+    h1.metric("Hedge PnL", _format_num(float(daily["hedge_pnl"].sum()), 2))
+    h2.metric("Avg Risk Reduction", f"{_format_num(float(daily['hedge_risk_reduction_pct'].mean()), 2)}%")
+    h3.metric("Avg |Hedge Shares|", _format_num(float(daily["hedge_shares"].abs().mean()), 1))
+
+    hedge_amt_chart = (
+        alt.Chart(daily)
+        .mark_bar()
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("hedge_shares:Q", title="Hedge Shares"),
+            color=alt.condition("datum.hedge_shares >= 0", alt.value("#0f766e"), alt.value("#b91c1c")),
+            tooltip=[
+                "date:T",
+                alt.Tooltip("hedge_shares:Q", title="Hedge shares"),
+                alt.Tooltip("net_option_delta_shares:Q", title="Option delta shares"),
+                alt.Tooltip("post_hedge_delta_shares:Q", title="Post-hedge delta"),
+            ],
+        )
+        .properties(height=220, title="Hedge Amount Per Day")
+    )
+    st.altair_chart(hedge_amt_chart, use_container_width=True)
+
+    hedge_pnl_bar = (
+        alt.Chart(daily)
+        .mark_bar(color="#d97706", opacity=0.6)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("hedge_pnl:Q", title="Hedge PnL"),
+            tooltip=[
+                "date:T",
+                alt.Tooltip("hedge_pnl:Q", title="Hedge PnL"),
+                alt.Tooltip("options_pnl:Q", title="Options PnL"),
+                alt.Tooltip("pnl:Q", title="Total PnL"),
+            ],
+        )
+    )
+    risk_reduction_line = (
+        alt.Chart(daily)
+        .mark_line(color="#111827", point=True)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("hedge_risk_reduction_pct:Q", title="Delta Risk Reduction (%)"),
+            tooltip=[
+                "date:T",
+                alt.Tooltip("hedge_risk_reduction_pct:Q", title="Risk reduction %"),
+                alt.Tooltip("net_option_delta_shares:Q", title="Option delta shares"),
+                alt.Tooltip("post_hedge_delta_shares:Q", title="Post-hedge delta"),
+            ],
+        )
+    )
+    st.altair_chart(
+        alt.layer(hedge_pnl_bar, risk_reduction_line)
+        .resolve_scale(y="independent")
+        .properties(height=240, title="Hedge Contribution to PnL and Risk Reduction"),
+        use_container_width=True,
+    )
 
     if not trades.empty:
         trades = trades.copy()
@@ -1016,7 +1179,7 @@ def _render_prediction_tab(eval_dir: Path, metrics: dict) -> None:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("RMSE", _format_num(metrics.get("price_rmse")))
     c2.metric("MAE", _format_num(metrics.get("price_mae")))
-    c3.metric("R2", _format_num(metrics.get("price_r2"), 3))
+    c3.metric("Next-Day R2", _format_num(metrics.get("next_price_r2", metrics.get("price_r2")), 3))
     c4.metric("Bias", _format_num(stat.get("bias")))
 
     c5, c6, c7, c8 = st.columns(4)

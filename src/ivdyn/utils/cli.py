@@ -169,15 +169,34 @@ def _backtest_command(ns: Any) -> None:
             device=ns.device,
             num_workers=ns.num_workers,
             inference_batch_size=ns.inference_batch_size,
+            initial_capital=ns.initial_capital,
             fill_gate=ns.fill_gate,
             slippage_bps=ns.slippage_bps,
             max_trades_per_day=ns.max_trades_per_day,
+            selector_long_score_scale=getattr(ns, "long_score_scale", 0.0),
+            selector_allow_long_puts=bool(getattr(ns, "allow_long_puts", True)),
             signal_abs_gate=ns.signal_abs_gate,
             min_dte=ns.min_dte,
             max_dte=ns.max_dte,
             min_moneyness=ns.min_moneyness,
             max_moneyness=ns.max_moneyness,
             max_rel_spread=ns.max_rel_spread,
+            strategy_mode=getattr(ns, "strategy_mode", "vertical"),
+            vertical_wing_width_pct_target=getattr(ns, "vertical_wing_width_pct_target", 0.03),
+            vertical_wing_width_pct_min=getattr(ns, "vertical_wing_width_pct_min", 0.01),
+            vertical_wing_width_pct_max=getattr(ns, "vertical_wing_width_pct_max", 0.08),
+            vertical_wing_max_premium_ratio=getattr(ns, "vertical_wing_max_premium_ratio", 0.35),
+            vertical_wing_fill_gate=getattr(ns, "vertical_wing_fill_gate", 0.50),
+            vertical_wing_max_rel_spread=getattr(ns, "vertical_wing_max_rel_spread", 0.15),
+            vertical_wing_min_moneyness=getattr(ns, "vertical_wing_min_moneyness", 0.75),
+            vertical_wing_max_moneyness=getattr(ns, "vertical_wing_max_moneyness", 1.30),
+            vertical_wing_rich_signal_penalty=getattr(ns, "vertical_wing_rich_signal_penalty", 0.75),
+            vertical_skip_if_no_wing=bool(getattr(ns, "vertical_skip_if_no_wing", True)),
+            hedge_underlying_delta=bool(getattr(ns, "hedge_underlying_delta", False)),
+            hedge_underlying_ratio=getattr(ns, "hedge_underlying_ratio", 1.0),
+            hedge_underlying_min_abs_shares=getattr(ns, "hedge_underlying_min_abs_shares", 25.0),
+            hedge_underlying_max_shares=getattr(ns, "hedge_underlying_max_shares", 5000),
+            hedge_underlying_slippage_bps=getattr(ns, "hedge_underlying_slippage_bps", 1.0),
         )
     )
     print(out_dir)
@@ -800,7 +819,7 @@ def _build_parser() -> ArgumentParser:
     p.add_argument("--dyn-batch-size", type=int, default=64)
     p.add_argument("--contract-batch-size", type=int, default=2048)
     p.add_argument("--head-lr", type=float, default=1e-3)
-    p.add_argument("--joint-epochs", type=int, default=30)
+    p.add_argument("--joint-epochs", type=int, default=120)
     p.add_argument("--joint-lr", type=float, default=5e-4)
     p.add_argument("--joint-contract-batch-size", type=int, default=4096)
     p.add_argument("--joint-dyn-lambda", type=float, default=1.0)
@@ -848,8 +867,28 @@ def _build_parser() -> ArgumentParser:
     p.add_argument("--device", default=None)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--inference-batch-size", type=int, default=65536)
+    p.add_argument("--initial-capital", type=float, default=10000.0)
     p.add_argument("--fill-gate", type=float, default=0.65)
     p.add_argument("--slippage-bps", type=float, default=7.5)
+    p.add_argument(
+        "--long-score-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for selecting LONG option trades based on negative signal. 0 disables longs (default). Typical range: 0.1–0.5.",
+    )
+    p.add_argument(
+        "--allow-long-puts",
+        dest="allow_long_puts",
+        action="store_true",
+        help="Allow LONG put candidates in the selector (enabled by default).",
+    )
+    p.add_argument(
+        "--no-allow-long-puts",
+        dest="allow_long_puts",
+        action="store_false",
+        help="Disable LONG put candidates in the selector.",
+    )
+    p.set_defaults(allow_long_puts=True)
     p.add_argument("--max-trades-per-day", type=int, default=5)
     p.add_argument(
         "--signal-abs-gate",
@@ -862,6 +901,42 @@ def _build_parser() -> ArgumentParser:
     p.add_argument("--min-moneyness", type=float, default=0.88)
     p.add_argument("--max-moneyness", type=float, default=1.12)
     p.add_argument("--max-rel-spread", type=float, default=0.10)
+
+    # Multi-leg / hedged extensions
+    p.add_argument(
+        "--strategy-mode",
+        choices=["single", "vertical"],
+        default="vertical",
+        help="Trade construction mode. 'single' = 1-leg option trades (current behavior). 'vertical' = defined-risk vertical spreads (adds a further-OTM wing leg).",
+    )
+    p.add_argument("--vertical-wing-width-pct-target", type=float, default=0.03, help="Vertical wing target distance as a fraction of spot (e.g., 0.02 ~= 2%% of spot).")
+    p.add_argument("--vertical-wing-width-pct-min", type=float, default=0.01, help="Minimum wing distance as a fraction of spot.")
+    p.add_argument("--vertical-wing-width-pct-max", type=float, default=0.08, help="Maximum wing distance as a fraction of spot.")
+    p.add_argument("--vertical-wing-max-premium-ratio", type=float, default=0.35, help="Require wing mid_now <= ratio * anchor mid_now.")
+    p.add_argument("--vertical-wing-fill-gate", type=float, default=0.50)
+    p.add_argument("--vertical-wing-max-rel-spread", type=float, default=0.15)
+    p.add_argument("--vertical-wing-min-moneyness", type=float, default=0.75)
+    p.add_argument("--vertical-wing-max-moneyness", type=float, default=1.30)
+    p.add_argument("--vertical-wing-rich-signal-penalty", type=float, default=0.75, help="Penalize long wings that are also 'rich' per the model (higher = avoid paying away alpha).")
+    p.add_argument(
+        "--vertical-skip-if-no-wing",
+        dest="vertical_skip_if_no_wing",
+        action="store_true",
+        help="Skip anchor trades when a suitable wing cannot be found (enabled by default).",
+    )
+    p.add_argument(
+        "--no-vertical-skip-if-no-wing",
+        dest="vertical_skip_if_no_wing",
+        action="store_false",
+        help="Allow fallback to single-leg anchor trade when no suitable wing is found.",
+    )
+    p.set_defaults(vertical_skip_if_no_wing=True)
+
+    p.add_argument("--hedge-underlying-delta", action="store_true", default=True, help="If set, add a daily underlying delta-hedge sized from BS deltas using the observed IV surface.")
+    p.add_argument("--hedge-underlying-ratio", type=float, default=0.5, help="0=off. 1.0=full delta neutralization; 0.5=half hedge.")
+    p.add_argument("--hedge-underlying-min-abs-shares", type=float, default=3.0, help="Do not place a hedge trade unless |shares| exceeds this threshold.")
+    p.add_argument("--hedge-underlying-max-shares", type=int, default=50)
+    p.add_argument("--hedge-underlying-slippage-bps", type=float, default=1.0)
     p.set_defaults(func=_backtest_command)
 
     p = sub.add_parser("ui")
