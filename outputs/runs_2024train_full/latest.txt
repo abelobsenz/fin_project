@@ -1,1 +1,1 @@
-/Users/abelobsenz/fin_project copy/outputs/runs_2024train_full/run_20260217_043014
+/Users/abelobsenz/fin_project copy/outputs/runs_2024train_full/run_20260217_064341

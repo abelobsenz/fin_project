@@ -103,6 +103,10 @@ def evaluate(
     contract_price_target = ds["contract_price_target"].astype(np.float32)
     contract_fill_target = ds["contract_fill_target"].astype(np.float32)
     contract_date_idx = ds["contract_date_index"].astype(np.int32)
+    contract_symbol = ds["contract_symbol"].astype(str)
+    contract_mid = ds["contract_mid"].astype(np.float32)
+    contract_spot = ds["contract_spot"].astype(np.float32)
+    contract_mid_norm = contract_mid / np.clip(contract_spot, 1e-6, None)
 
     train_dates, val_dates, test_dates = _load_split(run_dir, n_dates)
 
@@ -113,13 +117,19 @@ def evaluate(
 
         recon_raw = bundle.surface_scaler.inverse_transform(to_numpy(recon_scaled)).reshape(iv_surface_obs.shape)
         z_all = to_numpy(mu)
+        z_all_t = torch.as_tensor(z_all, dtype=torch.float32, device=dev)
+        ctx_t = torch.as_tensor(context_scaled, dtype=torch.float32, device=dev)
+        z_next = to_numpy(model.forward_dynamics(z_all_t, ctx_t))
 
         cf = torch.as_tensor(contract_scaled, dtype=torch.float32, device=dev)
         z_contract = torch.as_tensor(z_all[contract_date_idx], dtype=torch.float32, device=dev)
+        z_contract_next = torch.as_tensor(z_next[contract_date_idx], dtype=torch.float32, device=dev)
         price_scaled_pred = to_numpy(model.forward_pricer(z_contract, cf)).reshape(-1, 1)
+        price_scaled_pred_next = to_numpy(model.forward_pricer(z_contract_next, cf)).reshape(-1, 1)
         exec_logit = to_numpy(model.forward_execution_logit(z_contract, cf)).reshape(-1)
 
     price_pred = bundle.price_scaler.inverse_transform(price_scaled_pred).reshape(-1)
+    price_pred_next = bundle.price_scaler.inverse_transform(price_scaled_pred_next).reshape(-1)
     exec_prob = 1.0 / (1.0 + np.exp(-np.clip(exec_logit, -60.0, 60.0)))
 
     mask_test_contracts = np.isin(contract_date_idx, test_dates)
@@ -137,6 +147,40 @@ def evaluate(
         "exec_brier": brier_score(e_prob, e_true),
         "exec_positive_rate": float(np.mean(e_true)) if len(e_true) else float("nan"),
     }
+
+    next_key_mid_norm: dict[tuple[int, str], float] = {}
+    for i in range(len(contract_symbol)):
+        next_key_mid_norm[(int(contract_date_idx[i]), str(contract_symbol[i]))] = float(contract_mid_norm[i])
+
+    target_next_price_norm = np.full(len(contract_symbol), np.nan, dtype=np.float32)
+    for i in range(len(contract_symbol)):
+        k = (int(contract_date_idx[i] + 1), str(contract_symbol[i]))
+        if k in next_key_mid_norm:
+            target_next_price_norm[i] = np.float32(next_key_mid_norm[k])
+
+    pred_next_return = (price_pred_next - contract_price_target) / np.clip(contract_price_target, 1e-6, None)
+    target_next_return = (target_next_price_norm - contract_price_target) / np.clip(contract_price_target, 1e-6, None)
+
+    mask_test_next = mask_test_contracts & np.isfinite(target_next_price_norm)
+    y_next_true = target_next_price_norm[mask_test_next]
+    y_next_pred = price_pred_next[mask_test_next]
+    r_next_true = target_next_return[mask_test_next]
+    r_next_pred = pred_next_return[mask_test_next]
+
+    if len(y_next_true) > 0:
+        metrics["next_test_contracts"] = int(len(y_next_true))
+        metrics["next_price_rmse"] = rmse(y_next_pred, y_next_true)
+        metrics["next_price_mae"] = mae(y_next_pred, y_next_true)
+        metrics["next_price_r2"] = r2(y_next_pred, y_next_true)
+        metrics["next_return_directional_acc"] = float(np.mean(np.sign(r_next_pred) == np.sign(r_next_true)))
+        metrics["next_return_corr"] = float(np.corrcoef(r_next_pred, r_next_true)[0, 1]) if len(r_next_true) > 1 else float("nan")
+    else:
+        metrics["next_test_contracts"] = 0
+        metrics["next_price_rmse"] = float("nan")
+        metrics["next_price_mae"] = float("nan")
+        metrics["next_price_r2"] = float("nan")
+        metrics["next_return_directional_acc"] = float("nan")
+        metrics["next_return_corr"] = float("nan")
 
     pred_test = recon_raw[test_dates]
     obs_test = iv_surface_obs[test_dates]
@@ -194,6 +238,10 @@ def evaluate(
             "mid": ds["contract_mid"].astype(float),
             "target_price_norm": contract_price_target,
             "pred_price_norm": price_pred,
+            "target_next_price_norm": target_next_price_norm,
+            "pred_next_price_norm": price_pred_next,
+            "target_next_return": target_next_return,
+            "pred_next_return": pred_next_return,
             "target_fill": contract_fill_target,
             "pred_fill_prob": exec_prob,
             "split": np.where(

@@ -1,6 +1,0 @@
-{
-  "model_path": "/Users/abelobsenz/fin_project copy/outputs/runs_2024train_full/run_20260217_043014/model.pt",
-  "dataset_path": "/Users/abelobsenz/fin_project copy/outputs/dataset_train_2024_full/dataset.npz",
-  "device": "cpu",
-  "final_val_recon": 0.3927142322063446
-}
