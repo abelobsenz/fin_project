@@ -19,24 +19,38 @@ except Exception as exc:  # pragma: no cover
 
 from ivdyn.model import ModelBundle, device_auto, to_numpy
 from ivdyn.finance import bs_delta
+from ivdyn.eval.metrics import probabilistic_sharpe_ratio, sample_skew_kurtosis
 
 _OPRA_TICKER_RE = re.compile(r"^O:(?P<underlying>[A-Z]+)(?P<exp>\d{6})[CP]\d{8}$")
-_BACKTEST_VERSION = "2026-02-17-multileg-vertical-deltahedge-v5"
+_BACKTEST_VERSION = "2026-02-18-realistic-costs-fill-psr-v6"
 
 
 @dataclass(slots=True)
 class BacktestConfig:
     run_dir: Path
     dataset_path: Path
+    # Optional inclusive date filter (YYYY-MM-DD). Useful for debugging and walk-forward.
+    start_date: str | None = None
+    end_date: str | None = None
     device: str | None = None
     num_workers: int = 0
     inference_batch_size: int = 65536
     initial_capital: float = 10_000.0
 
     fill_gate: float = 0.65
-    slippage_bps: float = 7.5
+    slippage_bps: float = 10.0
     signal_abs_gate: float = 0.04
+    # Execution realism.
+    spread_cross_fraction: float = 0.75
+    # Explicit costs (round-trip; applied per-leg per-contract).
+    option_commission_per_contract: float = 0.65
+    option_fee_per_contract: float = 0.05
+    # Filtering / selection on net edge.
+    min_edge_to_cost_ratio: float = 1.25
+    # Fill modeling: "assume" (legacy optimistic) or "expected" (EV scaled by fill_prob).
+    fill_model: str = "expected"
     max_trades_per_day: int = 5
+    volume_participation_rate: float = 0.02
     selector_edge_clip_quantile: float = 0.95
     selector_mid_norm_floor: float = 0.0025
     selector_signal_soft_cap: float = 250.0
@@ -84,6 +98,10 @@ class BacktestConfig:
     hedge_underlying_slippage_bps: float = 1.0
 
 
+def _clamp01(x: float) -> float:
+    return float(np.clip(float(x), 0.0, 1.0))
+
+
 def _load_dataset(path: Path) -> dict[str, np.ndarray]:
     npz = np.load(path, allow_pickle=True)
     out: dict[str, np.ndarray] = {}
@@ -117,20 +135,42 @@ def _leg_pnl(
     *,
     mid_now: float,
     mid_next: float,
-    rel_spread: float,
+    rel_spread_now: float,
+    rel_spread_next: float,
     slippage: float,
+    spread_cross_fraction: float,
     side: int,
 ) -> float:
-    rel_sp = float(np.clip(rel_spread, 0.0, 3.0))
-    cost = slippage + 0.5 * rel_sp * 0.15
-    entry = mid_now * (1.0 + side * cost)
-    exit_ = mid_next * (1.0 - side * cost)
+    # Realistic fill model:
+    # - mid +/- (half-spread * cross_fraction) for each fill
+    # - plus slippage on both entry and exit
+    rel_now = float(np.clip(rel_spread_now, 0.0, 3.0))
+    rel_nxt = float(np.clip(rel_spread_next, 0.0, 3.0))
+    cross = float(np.clip(spread_cross_fraction, 0.0, 1.0))
+    entry_cost = float(slippage + 0.5 * rel_now * cross)
+    exit_cost = float(slippage + 0.5 * rel_nxt * cross)
+    entry = float(mid_now * (1.0 + side * entry_cost))
+    exit_ = float(mid_next * (1.0 - side * exit_cost))
     return float(side * (exit_ - entry))
 
 
-def _execution_cost_norm(mid_now: float, rel_spread: float, slippage: float) -> float:
+def _execution_cost_norm(mid_now: float, rel_spread: float, slippage: float, spread_cross_fraction: float) -> float:
     rel_sp = float(np.clip(rel_spread, 0.0, 3.0))
-    return float(mid_now * (slippage + 0.5 * rel_sp * 0.15))
+    cross = float(np.clip(spread_cross_fraction, 0.0, 1.0))
+    return float(mid_now * (slippage + 0.5 * rel_sp * cross))
+
+
+def _option_roundtrip_fees(
+    *,
+    contracts: float,
+    legs: int,
+    commission_per_contract: float,
+    fee_per_contract: float,
+) -> float:
+    # Round-trip: entry + exit, per leg.
+    c = float(max(contracts, 0.0))
+    per = float(max(commission_per_contract, 0.0) + max(fee_per_contract, 0.0))
+    return float(2.0 * c * float(max(legs, 1)) * per)
 
 
 def _underlying_pnl(
@@ -267,6 +307,7 @@ def _predict_contracts(
     ds: dict[str, np.ndarray],
     dev: torch.device,
     batch_size: int,
+    contract_indices: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     model = model_bundle.model.to(dev).eval()
     iv_surface = ds["iv_surface"].astype(np.float32)
@@ -290,25 +331,32 @@ def _predict_contracts(
         z_next = to_numpy(model.forward_dynamics(z_prev_t, ctx_t))
 
     n_contracts = len(contract_scaled)
-    pred_now = np.empty(n_contracts, dtype=np.float32)
-    pred_next = np.empty(n_contracts, dtype=np.float32)
-    fill_prob = np.empty(n_contracts, dtype=np.float32)
+    pred_now = np.full(n_contracts, np.nan, dtype=np.float32)
+    pred_next = np.full(n_contracts, np.nan, dtype=np.float32)
+    fill_prob = np.zeros(n_contracts, dtype=np.float32)
+
+    if contract_indices is None:
+        sel = np.arange(n_contracts, dtype=np.int32)
+    else:
+        sel = np.asarray(contract_indices, dtype=np.int32).reshape(-1)
+        if sel.size == 0:
+            return pred_now, pred_next, fill_prob
 
     with torch.no_grad():
-        for i in range(0, n_contracts, batch_size):
-            j = min(i + batch_size, n_contracts)
-            idx = slice(i, j)
-            d = date_idx[idx]
-            cf = torch.as_tensor(contract_scaled[idx], dtype=torch.float32, device=dev)
+        for i in range(0, int(sel.size), batch_size):
+            j = min(i + batch_size, int(sel.size))
+            idx_sel = sel[i:j]
+            d = date_idx[idx_sel]
+            cf = torch.as_tensor(contract_scaled[idx_sel], dtype=torch.float32, device=dev)
             zc_now = torch.as_tensor(z_now[d], dtype=torch.float32, device=dev)
             zc_next = torch.as_tensor(z_next[d], dtype=torch.float32, device=dev)
 
             p_now_scaled = to_numpy(model.forward_pricer(zc_now, cf)).reshape(-1, 1)
             p_next_scaled = to_numpy(model.forward_pricer(zc_next, cf)).reshape(-1, 1)
-            pred_now[idx] = model_bundle.price_scaler.inverse_transform(p_now_scaled).reshape(-1)
-            pred_next[idx] = model_bundle.price_scaler.inverse_transform(p_next_scaled).reshape(-1)
+            pred_now[idx_sel] = model_bundle.price_scaler.inverse_transform(p_now_scaled).reshape(-1)
+            pred_next[idx_sel] = model_bundle.price_scaler.inverse_transform(p_next_scaled).reshape(-1)
             logits = to_numpy(model.forward_execution_logit(zc_now, cf)).reshape(-1)
-            fill_prob[idx] = _sigmoid(logits).astype(np.float32)
+            fill_prob[idx_sel] = _sigmoid(logits).astype(np.float32)
 
     return pred_now, pred_next, fill_prob
 
@@ -325,55 +373,6 @@ def run_backtest(cfg: BacktestConfig) -> Path:
 
     dev = torch.device(cfg.device) if cfg.device else device_auto()
     model_path = run_dir / "model.pt"
-    bundle = ModelBundle.load(model_path, device=dev)
-
-    # Cache inference to allow fast strategy iteration.
-    cache_path = bt_dir / "pred_cache.npz"
-    cache_meta_path = bt_dir / "pred_cache_meta.json"
-    use_cache = False
-    if cache_path.exists() and cache_meta_path.exists():
-        try:
-            meta = json.loads(cache_meta_path.read_text(encoding="utf-8"))
-            if (
-                meta.get("dataset") == str(dataset_path)
-                and meta.get("model") == str(model_path)
-                and int(meta.get("dataset_mtime", -1)) == int(dataset_path.stat().st_mtime)
-                and int(meta.get("model_mtime", -1)) == int(model_path.stat().st_mtime)
-            ):
-                use_cache = True
-        except Exception:
-            use_cache = False
-
-    if use_cache:
-        cached = np.load(cache_path, allow_pickle=False)
-        pred_now_norm = cached["pred_now_norm"].astype(np.float32)
-        pred_next_norm = cached["pred_next_norm"].astype(np.float32)
-        fill_prob = cached["fill_prob"].astype(np.float32)
-    else:
-        pred_now_norm, pred_next_norm, fill_prob = _predict_contracts(
-            model_bundle=bundle,
-            ds=ds,
-            dev=dev,
-            batch_size=max(1, int(cfg.inference_batch_size)),
-        )
-        np.savez_compressed(
-            cache_path,
-            pred_now_norm=pred_now_norm.astype(np.float32),
-            pred_next_norm=pred_next_norm.astype(np.float32),
-            fill_prob=fill_prob.astype(np.float32),
-        )
-        cache_meta_path.write_text(
-            json.dumps(
-                {
-                    "dataset": str(dataset_path),
-                    "model": str(model_path),
-                    "dataset_mtime": int(dataset_path.stat().st_mtime),
-                    "model_mtime": int(model_path.stat().st_mtime),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
 
     dates = ds["dates"].astype(str)
     n_dates = len(dates)
@@ -423,17 +422,97 @@ def run_backtest(cfg: BacktestConfig) -> Path:
 
     next_key_mid: dict[tuple[int, str], float] = {}
     next_key_mid_norm: dict[tuple[int, str], float] = {}
+    next_key_rel_spread: dict[tuple[int, str], float] = {}
     for i in range(len(symbol)):
         key = (int(date_idx[i]), str(symbol[i]))
         next_key_mid[key] = float(mid_now[i])
         next_key_mid_norm[key] = float(mid_now_norm[i])
+        next_key_rel_spread[key] = float(rel_spread[i]) if np.isfinite(rel_spread[i]) else float("nan")
     mid_next = np.full(len(symbol), np.nan, dtype=np.float32)
     mid_next_norm = np.full(len(symbol), np.nan, dtype=np.float32)
+    rel_spread_next = np.full(len(symbol), np.nan, dtype=np.float32)
     for i in range(len(symbol)):
         k = (int(date_idx[i] + 1), str(symbol[i]))
         if k in next_key_mid:
             mid_next[i] = np.float32(next_key_mid[k])
             mid_next_norm[i] = np.float32(next_key_mid_norm[k])
+            rel_spread_next[i] = np.float32(next_key_rel_spread.get(k, float("nan")))
+
+    # --- Inference (subset) ---
+    # Predict only for contracts in the reasonable trading universe to keep the workflow fast.
+    # This prevents inference over the full (often huge) contract universe.
+    universe_mask = (
+        (date_idx < (n_dates - 1))
+        & underlying_mask
+        & np.isfinite(mid_next)
+        & (dte >= int(cfg.min_dte))
+        & (dte <= int(cfg.max_dte))
+        & (moneyness >= float(min(cfg.min_moneyness, cfg.vertical_wing_min_moneyness)))
+        & (moneyness <= float(max(cfg.max_moneyness, cfg.vertical_wing_max_moneyness)))
+        & (rel_spread <= float(max(cfg.max_rel_spread, cfg.vertical_wing_max_rel_spread)))
+        & (mid_now_norm >= float(cfg.selector_mid_norm_floor) * 0.50)
+    )
+    if cfg.start_date or cfg.end_date:
+        start = str(cfg.start_date) if cfg.start_date else ""
+        end = str(cfg.end_date) if cfg.end_date else "9999-12-31"
+        universe_mask &= (date_arr >= start) & (date_arr <= end)
+
+    contract_indices = np.flatnonzero(universe_mask).astype(np.int32)
+
+    bundle = ModelBundle.load(model_path, device=dev)
+
+    cache_path = bt_dir / "pred_cache.npz"
+    cache_meta_path = bt_dir / "pred_cache_meta.json"
+    use_cache = False
+    sig = {
+        "dataset_name": dataset_path.name,
+        "model_name": model_path.name,
+        "dataset_mtime": int(dataset_path.stat().st_mtime),
+        "model_mtime": int(model_path.stat().st_mtime),
+        "dataset_size": int(dataset_path.stat().st_size),
+        "model_size": int(model_path.stat().st_size),
+        "universe_n": int(contract_indices.size),
+        "universe_cfg": {
+            "min_dte": int(cfg.min_dte),
+            "max_dte": int(cfg.max_dte),
+            "min_moneyness": float(cfg.min_moneyness),
+            "max_moneyness": float(cfg.max_moneyness),
+            "max_rel_spread": float(cfg.max_rel_spread),
+            "vertical_wing_min_moneyness": float(cfg.vertical_wing_min_moneyness),
+            "vertical_wing_max_moneyness": float(cfg.vertical_wing_max_moneyness),
+            "vertical_wing_max_rel_spread": float(cfg.vertical_wing_max_rel_spread),
+            "start_date": str(cfg.start_date) if cfg.start_date else None,
+            "end_date": str(cfg.end_date) if cfg.end_date else None,
+        },
+    }
+    if cache_path.exists() and cache_meta_path.exists():
+        try:
+            meta = json.loads(cache_meta_path.read_text(encoding="utf-8"))
+            if meta == sig:
+                use_cache = True
+        except Exception:
+            use_cache = False
+
+    if use_cache:
+        cached = np.load(cache_path, allow_pickle=False)
+        pred_now_norm = cached["pred_now_norm"].astype(np.float32)
+        pred_next_norm = cached["pred_next_norm"].astype(np.float32)
+        fill_prob = cached["fill_prob"].astype(np.float32)
+    else:
+        pred_now_norm, pred_next_norm, fill_prob = _predict_contracts(
+            model_bundle=bundle,
+            ds=ds,
+            dev=dev,
+            batch_size=max(1, int(cfg.inference_batch_size)),
+            contract_indices=contract_indices,
+        )
+        np.savez_compressed(
+            cache_path,
+            pred_now_norm=pred_now_norm.astype(np.float32),
+            pred_next_norm=pred_next_norm.astype(np.float32),
+            fill_prob=fill_prob.astype(np.float32),
+        )
+        cache_meta_path.write_text(json.dumps(sig, indent=2), encoding="utf-8")
 
     edge_raw_norm = mid_now_norm - pred_next_norm
     edge = np.divide(
@@ -457,6 +536,11 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         & (mid_now_norm >= float(cfg.selector_mid_norm_floor))
         & (np.abs(edge) >= float(cfg.signal_abs_gate))
     )
+
+    if cfg.start_date or cfg.end_date:
+        start = str(cfg.start_date) if cfg.start_date else ""
+        end = str(cfg.end_date) if cfg.end_date else "9999-12-31"
+        tradable &= (date_arr >= start) & (date_arr <= end)
 
     side = np.full(len(symbol), "", dtype=object)
     long_mask = tradable & (edge < 0.0)
@@ -532,6 +616,9 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "max_fill_distance",
         "contracts",
         "notional",
+        "fees",
+        "pnl_before_fees",
+        "pnl_gross",
         "pnl",
     ]
 
@@ -587,11 +674,32 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         rel_sp_day = np.clip(day["rel_spread"].to_numpy(dtype=float), 0.0, 3.0)
         abs_signal_day = np.abs(day["signal"].to_numpy(dtype=float))
 
-        exec_cost_est = mid_now_day * (slippage + 0.5 * rel_sp_day * 0.15)
-        edge_net = np.clip(edge_rank - 2.0 * exec_cost_est, 0.0, None)
+        spread_cross = float(np.clip(cfg.spread_cross_fraction, 0.0, 1.0))
+        exec_cost_est = np.array(
+            [
+                _execution_cost_norm(float(m), float(rs), slippage, spread_cross)
+                for m, rs in zip(mid_now_day, rel_sp_day, strict=False)
+            ],
+            dtype=float,
+        )
+        # Conservative round-trip cost estimate (entry+exit) using today's spread.
+        roundtrip_exec_cost = 2.0 * exec_cost_est
+        fees_rt = 2.0 * (float(cfg.option_commission_per_contract) + float(cfg.option_fee_per_contract))
+        # Convert fees to "per share" space (contract_multiplier shares).
+        fees_rt_per_share = fees_rt / contract_multiplier
+
+        # Net edge after expected execution & fees (still in $/share).
+        edge_net = np.clip(edge_rank - roundtrip_exec_cost - fees_rt_per_share, 0.0, None)
+
+        # Require the edge to clear costs by a ratio (prevents micro-edge cost bleed).
+        denom = np.clip(roundtrip_exec_cost + fees_rt_per_share, 1e-12, None)
+        edge_to_cost = np.divide(edge_rank, denom, out=np.zeros_like(edge_rank), where=denom > 0)
+        edge_ok = edge_to_cost >= float(cfg.min_edge_to_cost_ratio)
+
         spread_penalty = 1.0 + rel_sp_day
         signal_penalty = 1.0 / (1.0 + (abs_signal_day / selector_signal_soft_cap))
-        selection_score = edge_net * fill_day * signal_penalty / spread_penalty
+        fill_factor = fill_day if str(cfg.fill_model).lower().startswith("exp") else 1.0
+        selection_score = np.where(edge_ok, edge_net * fill_factor * signal_penalty / spread_penalty, 0.0)
 
         cp_day = np.clip(day["cp_sign"].to_numpy(dtype=float), -1.0, 1.0)
         side_day = day["side"].to_numpy(dtype=str)
@@ -746,14 +854,17 @@ def run_backtest(cfg: BacktestConfig) -> Path:
             if not np.isfinite(mid_now_main) or not np.isfinite(mid_next_main):
                 continue
 
+            rel_sp_next_main = float(rel_spread_next[anchor_contract_idx])
             pnl_per_share_main = _leg_pnl(
                 mid_now=mid_now_main,
                 mid_next=mid_next_main,
-                rel_spread=rel_sp_main,
+                rel_spread_now=rel_sp_main,
+                rel_spread_next=rel_sp_next_main,
                 slippage=slippage,
+                spread_cross_fraction=float(cfg.spread_cross_fraction),
                 side=main_side,
             )
-            exec_cost_per_share_main = _execution_cost_norm(mid_now_main, rel_sp_main, slippage)
+            exec_cost_per_share_main = _execution_cost_norm(mid_now_main, rel_sp_main, slippage, float(cfg.spread_cross_fraction))
 
             pnl_per_contract_main = float(pnl_per_share_main * contract_multiplier)
             signal_i = float(day.at[i, "signal"])
@@ -774,6 +885,18 @@ def run_backtest(cfg: BacktestConfig) -> Path:
             ev_per_contract = ev_per_contract_main
             execution_cost_per_contract = execution_cost_per_contract_main
             execution_cost_ratio = execution_cost_ratio_main
+
+            fill_p = float(day.at[i, "fill_prob"])
+            fill_factor = _clamp01(fill_p) if str(cfg.fill_model).lower().startswith("exp") else 1.0
+            fees = _option_roundtrip_fees(
+                contracts=fill_factor,
+                legs=legs,
+                commission_per_contract=float(cfg.option_commission_per_contract),
+                fee_per_contract=float(cfg.option_fee_per_contract),
+            )
+            pnl_before_fees = float(pnl_per_contract * fill_factor)
+            pnl_gross = pnl_before_fees
+            pnl_net = float(pnl_before_fees - fees)
 
             wing_contract_idx: int | None = None
             if strategy_mode == "vertical":
@@ -802,11 +925,13 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     pnl_per_share_w = _leg_pnl(
                         mid_now=mid_now_w,
                         mid_next=mid_next_w,
-                        rel_spread=rel_sp_w,
+                        rel_spread_now=rel_sp_w,
+                        rel_spread_next=float(rel_spread_next[int(wing_contract_idx)]),
                         slippage=slippage,
+                        spread_cross_fraction=float(cfg.spread_cross_fraction),
                         side=wing_side,
                     )
-                    exec_cost_per_share_w = _execution_cost_norm(mid_now_w, rel_sp_w, slippage)
+                    exec_cost_per_share_w = _execution_cost_norm(mid_now_w, rel_sp_w, slippage, float(cfg.spread_cross_fraction))
 
                     wing_pnl_per_contract = float(pnl_per_share_w * contract_multiplier)
                     wing_signal = float(edge[wing_contract_idx])
@@ -820,6 +945,17 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     ev_per_contract = ev_per_contract_main + ev_per_contract_w
                     execution_cost_per_contract = execution_cost_per_contract_main + execution_cost_per_contract_w
                     execution_cost_ratio = float(0.5 * (execution_cost_ratio_main + execution_cost_ratio_w))
+
+                    # Update fees and net PnL for 2-leg.
+                    fees = _option_roundtrip_fees(
+                        contracts=fill_factor,
+                        legs=legs,
+                        commission_per_contract=float(cfg.option_commission_per_contract),
+                        fee_per_contract=float(cfg.option_fee_per_contract),
+                    )
+                    pnl_before_fees = float(pnl_per_contract * fill_factor)
+                    pnl_gross = pnl_before_fees
+                    pnl_net = float(pnl_before_fees - fees)
                 else:
                     if bool(cfg.vertical_skip_if_no_wing):
                         continue
@@ -827,6 +963,10 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     wing_symbol = ""
                     wing_strike = float("nan")
                     wing_side_lbl = ""
+
+            # Apply fill model scaling to EV and costs too (expected fills).
+            ev_per_contract = float(ev_per_contract * fill_factor)
+            execution_cost_per_contract = float(execution_cost_per_contract * fill_factor)
 
             # Structures (trades.parquet) remain one-row per anchor idea for compatibility.
             trade_rows.append(
@@ -864,9 +1004,12 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     "execution_cost_per_contract": execution_cost_per_contract,
                     "execution_cost_ratio": execution_cost_ratio,
                     "max_fill_distance": max_fill_distance,
-                    "contracts": 1,
+                    "contracts": fill_factor,
                     "notional": notional,
-                    "pnl": pnl_per_contract,
+                    "fees": fees,
+                    "pnl_before_fees": pnl_before_fees,
+                    "pnl_gross": pnl_gross,
+                    "pnl": pnl_net,
                 }
             )
 
@@ -884,7 +1027,7 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     "contract_idx": anchor_contract_idx,
                     "symbol": anchor_symbol,
                     "side": side_lbl,
-                    "contracts": 1,
+                    "contracts": float(fill_factor),
                     "call_put": cp,
                     "strike": float(day.at[i, "strike"]),
                     "dte": dte_i,
@@ -894,12 +1037,12 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     "rel_spread": rel_sp_main,
                     "pred_next_norm": float(day.at[i, "pred_next_norm"]),
                     "signal": signal_i,
-                    "pnl": pnl_per_contract_main,
+                    "pnl": float(pnl_per_contract_main * fill_factor),
                 }
             )
             option_leg_idx.append(anchor_contract_idx)
             option_leg_side_sign.append(float(main_side))
-            option_leg_contracts.append(1.0)
+            option_leg_contracts.append(float(fill_factor))
 
             if wing_contract_idx is not None:
                 wing_side_sign = 1 if wing_side_lbl == "LONG" else -1
@@ -913,7 +1056,7 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                         "contract_idx": int(wing_contract_idx),
                         "symbol": wing_symbol,
                         "side": wing_side_lbl,
-                        "contracts": 1,
+                        "contracts": float(fill_factor),
                         "call_put": str(call_put[wing_contract_idx]),
                         "strike": float(strike[wing_contract_idx]),
                         "dte": int(dte[wing_contract_idx]),
@@ -923,12 +1066,12 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                         "rel_spread": float(rel_spread[wing_contract_idx]),
                         "pred_next_norm": float(pred_next_norm[wing_contract_idx]),
                         "signal": float(edge[wing_contract_idx]),
-                        "pnl": float(wing_pnl_per_contract),
+                        "pnl": float(wing_pnl_per_contract * fill_factor),
                     }
                 )
                 option_leg_idx.append(int(wing_contract_idx))
                 option_leg_side_sign.append(float(wing_side_sign))
-                option_leg_contracts.append(1.0)
+                option_leg_contracts.append(float(fill_factor))
 
         # Compute per-leg deltas / IVs (needed for the underlying delta hedge and diagnostics).
         can_interp = (
@@ -1081,6 +1224,8 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     if trades.empty:
         daily = all_days.copy()
         daily["options_pnl"] = 0.0
+        daily["options_pnl_gross"] = 0.0
+        daily["fees"] = 0.0
         daily["hedge_pnl"] = 0.0
         daily["pnl"] = 0.0
         daily["trades"] = 0
@@ -1092,7 +1237,12 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         daily["hedge_shares"] = 0.0
         daily["post_hedge_delta_shares"] = 0.0
     else:
-        opt_daily = trades.groupby("date", as_index=False).agg(options_pnl=("pnl", "sum"), trades=("pnl", "size"))
+        opt_daily = trades.groupby("date", as_index=False).agg(
+            options_pnl=("pnl", "sum"),
+            options_pnl_gross=("pnl_gross", "sum"),
+            fees=("fees", "sum"),
+            trades=("pnl", "size"),
+        )
         hedge_proxy = trades.groupby("date", as_index=False).agg(
             net_delta_proxy=("delta_proxy", "sum"),
             gross_delta_proxy=("delta_proxy", lambda s: float(np.abs(s).sum())),
@@ -1113,6 +1263,8 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         )
 
         daily["options_pnl"] = pd.to_numeric(daily.get("options_pnl"), errors="coerce").fillna(0.0)
+        daily["options_pnl_gross"] = pd.to_numeric(daily.get("options_pnl_gross"), errors="coerce").fillna(0.0)
+        daily["fees"] = pd.to_numeric(daily.get("fees"), errors="coerce").fillna(0.0)
         daily["hedge_pnl"] = pd.to_numeric(daily.get("hedge_pnl"), errors="coerce").fillna(0.0)
         daily["pnl"] = daily["options_pnl"] + daily["hedge_pnl"]
         daily["trades"] = pd.to_numeric(daily.get("trades"), errors="coerce").fillna(0).astype(int)
@@ -1142,7 +1294,14 @@ def run_backtest(cfg: BacktestConfig) -> Path:
 
     daily_vol = float(pnl.std(ddof=0)) if len(pnl) else 0.0
     daily_mean = float(pnl.mean()) if len(pnl) else 0.0
-    daily_sharpe = float(np.sqrt(252.0) * daily_mean / daily_vol) if daily_vol > 0 else 0.0
+    # Sharpe should be computed on returns, not raw dollars.
+    equity_start = equity.shift(1).fillna(initial_capital)
+    daily_ret = (pnl / equity_start.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    ret_vol = float(daily_ret.std(ddof=0)) if len(daily_ret) else 0.0
+    ret_mean = float(daily_ret.mean()) if len(daily_ret) else 0.0
+    daily_sharpe = float(np.sqrt(252.0) * ret_mean / ret_vol) if ret_vol > 0 else 0.0
+    ret_skew, ret_kurt = sample_skew_kurtosis(daily_ret.to_numpy(dtype=float))
+    psr_sr0_0 = probabilistic_sharpe_ratio(daily_ret.to_numpy(dtype=float), benchmark_sharpe_ann=0.0, periods_per_year=252)
 
     summary = {
         "backtest_version": _BACKTEST_VERSION,
@@ -1156,16 +1315,27 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "initial_capital": initial_capital,
         "final_equity": float(equity.iloc[-1]) if len(equity) else initial_capital,
         "total_pnl": float(pnl.sum()),
+        "total_fees": float(daily.get("fees", pd.Series(dtype=float)).sum()),
+        "total_options_pnl_gross": float(daily.get("options_pnl_gross", pd.Series(dtype=float)).sum()),
         "total_options_pnl": float(daily.get("options_pnl", pd.Series(dtype=float)).sum()),
         "total_hedge_pnl": float(daily.get("hedge_pnl", pd.Series(dtype=float)).sum()),
         "avg_daily_pnl": daily_mean,
         "daily_vol_pnl": daily_vol,
         "daily_sharpe": daily_sharpe,
+        "return_skew": float(ret_skew) if np.isfinite(ret_skew) else float("nan"),
+        "return_kurtosis": float(ret_kurt) if np.isfinite(ret_kurt) else float("nan"),
+        "psr_sr0_0": float(psr_sr0_0) if np.isfinite(psr_sr0_0) else float("nan"),
         "max_drawdown": max_drawdown,
         "max_drawdown_abs": max_drawdown_abs,
         "win_rate": float((pnl > 0).mean()) if len(pnl) else 0.0,
         "fill_gate": float(cfg.fill_gate),
+        "fill_model": str(cfg.fill_model),
         "max_trades_per_day": int(cfg.max_trades_per_day),
+        "volume_participation_rate": float(cfg.volume_participation_rate),
+        "spread_cross_fraction": float(cfg.spread_cross_fraction),
+        "option_commission_per_contract": float(cfg.option_commission_per_contract),
+        "option_fee_per_contract": float(cfg.option_fee_per_contract),
+        "min_edge_to_cost_ratio": float(cfg.min_edge_to_cost_ratio),
         "selector_edge_clip_quantile": float(cfg.selector_edge_clip_quantile),
         "selector_mid_norm_floor": float(cfg.selector_mid_norm_floor),
         "selector_signal_soft_cap": float(cfg.selector_signal_soft_cap),

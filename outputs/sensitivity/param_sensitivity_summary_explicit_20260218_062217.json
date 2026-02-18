@@ -1,0 +1,51 @@
+[
+  {
+    "param": "spread_cross_fraction",
+    "mean_abs_delta_pnl": 3943.309204785793,
+    "max_abs_delta_pnl": 6956.0144205188335,
+    "mean_abs_delta_sharpe": 1.0933124119568989,
+    "mean_abs_delta_trades": 10.125
+  },
+  {
+    "param": "slippage_bps",
+    "mean_abs_delta_pnl": 901.7555194176766,
+    "max_abs_delta_pnl": 1759.704473160221,
+    "mean_abs_delta_sharpe": 0.2582278298500677,
+    "mean_abs_delta_trades": 4.375
+  },
+  {
+    "param": "option_commission_per_contract",
+    "mean_abs_delta_pnl": 709.4945699337434,
+    "max_abs_delta_pnl": 1205.5038211961905,
+    "mean_abs_delta_sharpe": 0.21909867013898268,
+    "mean_abs_delta_trades": 0.25
+  },
+  {
+    "param": "min_edge_to_cost_ratio",
+    "mean_abs_delta_pnl": 605.1630060119522,
+    "max_abs_delta_pnl": 1432.566969339335,
+    "mean_abs_delta_sharpe": 0.24015195786373922,
+    "mean_abs_delta_trades": 6.375
+  },
+  {
+    "param": "fill_gate",
+    "mean_abs_delta_pnl": 118.59580460694451,
+    "max_abs_delta_pnl": 431.7363407698581,
+    "mean_abs_delta_sharpe": 0.030977849102995086,
+    "mean_abs_delta_trades": 0.625
+  },
+  {
+    "param": "option_fee_per_contract",
+    "mean_abs_delta_pnl": 108.24096536904548,
+    "max_abs_delta_pnl": 166.52056566476813,
+    "mean_abs_delta_sharpe": 0.034540893175012466,
+    "mean_abs_delta_trades": 0.0
+  },
+  {
+    "param": "volume_participation_rate",
+    "mean_abs_delta_pnl": 54.55949434432932,
+    "max_abs_delta_pnl": 218.2379773773173,
+    "mean_abs_delta_sharpe": 0.08431366146261376,
+    "mean_abs_delta_trades": 0.0
+  }
+]

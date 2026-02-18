@@ -38,6 +38,7 @@ def _inject_style() -> None:
 }
 
 .stApp {
+  font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
   background:
     radial-gradient(1200px 500px at 0% -10%, #dff1e5 0%, rgba(223,241,229,0.2) 60%, transparent 100%),
     radial-gradient(1000px 400px at 100% 0%, #e2f0f2 0%, rgba(226,240,242,0.1) 55%, transparent 100%),
@@ -56,10 +57,105 @@ h1, h2, h3 {
   border-radius: 10px;
   padding: 10px 12px;
 }
+
+.console-hero {
+  border: 1px solid #d7e4dc;
+  border-radius: 14px;
+  background: linear-gradient(160deg, #f8fcfa 0%, #eef5f1 100%);
+  padding: 12px 14px;
+  margin-bottom: 0.5rem;
+  box-shadow: 0 5px 18px rgba(15, 23, 42, 0.04);
+}
+
+.console-hero .title {
+  font-weight: 700;
+  color: #10271e;
+  margin-bottom: 4px;
+}
+
+.console-hero .meta {
+  font-size: 0.92rem;
+  color: #43574e;
+}
+
+div[data-testid="stMetric"] {
+  border: 1px solid #d7e4dc;
+  border-radius: 12px;
+  background: #fbfdfb;
+  padding: 8px 10px;
+}
 </style>
 """,
         unsafe_allow_html=True,
     )
+
+
+def _extract_symbol_from_run_dir(run_dir: Path) -> str | None:
+    parts = run_dir.resolve().parts
+    for i, part in enumerate(parts):
+        if part == "outputs" and i + 2 < len(parts) and parts[i + 2] == "runs":
+            symbol = parts[i + 1].strip().upper()
+            return symbol or None
+    train_summary = run_dir / "train_summary.json"
+    if train_summary.exists():
+        try:
+            payload = json.loads(train_summary.read_text(encoding="utf-8"))
+            symbol = str(payload.get("underlying_symbol", "")).strip().upper()
+            return symbol or None
+        except Exception:
+            return None
+    return None
+
+
+def _discover_latest_runs_by_symbol(outputs_root: Path) -> dict[str, Path]:
+    def _run_recency(run_dir: Path) -> float:
+        # Prefer artifact freshness (backtest/eval/train updates) over run-dir creation time.
+        recency = run_dir.stat().st_mtime
+        for rel in (
+            "backtest/summary.json",
+            "backtest/daily.parquet",
+            "backtest/daily.csv",
+            "evaluation/metrics.json",
+            "train_summary.json",
+        ):
+            p = run_dir / rel
+            if p.exists():
+                try:
+                    recency = max(recency, p.stat().st_mtime)
+                except Exception:
+                    continue
+        return float(recency)
+
+    by_symbol: dict[str, Path] = {}
+    if not outputs_root.exists():
+        return by_symbol
+
+    for symbol_dir in sorted(outputs_root.iterdir()):
+        if not symbol_dir.is_dir():
+            continue
+        runs_root = symbol_dir / "runs"
+        if not runs_root.is_dir():
+            continue
+
+        candidates: list[Path] = [p for p in runs_root.glob("**/run_*") if p.is_dir()]
+        for latest_path in runs_root.glob("**/latest.txt"):
+            try:
+                target = Path(latest_path.read_text(encoding="utf-8").strip()).expanduser().resolve()
+            except Exception:
+                continue
+            if target.is_dir():
+                candidates.append(target)
+
+        if not candidates:
+            continue
+
+        try:
+            newest = max(candidates, key=_run_recency).resolve()
+        except Exception:
+            continue
+        by_symbol[symbol_dir.name.upper()] = newest
+
+    return by_symbol
 
 
 def _resolve_run_dir() -> Path:
@@ -67,23 +163,61 @@ def _resolve_run_dir() -> Path:
     latest_file = default_base / "latest.txt"
     env_default = os.environ.get("IVDYN_DEFAULT_RUN_DIR", "").strip()
     if env_default:
-        default = env_default
+        default = str(Path(env_default).expanduser())
     else:
         default = latest_file.read_text(encoding="utf-8").strip() if latest_file.exists() else ""
+    outputs_root = Path("outputs")
+    symbol_latest = _discover_latest_runs_by_symbol(outputs_root)
+    symbols = sorted(symbol_latest)
+
+    default_symbol = _extract_symbol_from_run_dir(Path(default)) if default else None
+    if default_symbol not in symbol_latest:
+        default_symbol = symbols[0] if symbols else None
 
     with st.sidebar:
         st.header("Run Selection")
-        run_dir_str = st.text_input("Run directory", value=default)
+        run_source = "Manual run directory"
+        if symbols:
+            run_source_choices = ["Latest by stock", "Manual run directory"]
+            default_source_idx = 1 if env_default else 0
+            run_source = st.radio("Run source", options=run_source_choices, index=default_source_idx)
+
+            default_idx = symbols.index(default_symbol) if default_symbol in symbols else 0
+            selected_symbol = st.selectbox("Stock (latest run)", options=symbols, index=default_idx)
+            latest_run = symbol_latest[selected_symbol]
+            st.caption(f"Most recent run for {selected_symbol}: `{latest_run}`")
+        else:
+            latest_run = None
+
+        if run_source == "Latest by stock" and latest_run is not None:
+            run_dir_str = str(latest_run)
+            st.text_input("Resolved run directory", value=run_dir_str, disabled=True, key="resolved_run_dir")
+        else:
+            manual_default = default
+            if not manual_default and latest_run is not None:
+                manual_default = str(latest_run)
+            run_dir_str = st.text_input("Run directory", value=manual_default, key="manual_run_dir")
+
         dataset_str = st.text_input("Dataset path", value="outputs/datasets/dataset/dataset.npz")
         st.session_state["dataset_path"] = dataset_str
 
-    return Path(run_dir_str)
+    return Path(run_dir_str).expanduser()
 
 
 def _read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_parquet_or_csv(path: Path) -> pd.DataFrame:
+    """Read parquet if available, else fall back to CSV with the same stem."""
+    if path.exists():
+        return pd.read_parquet(path)
+    csv_path = path.with_suffix(".csv")
+    if csv_path.exists():
+        return pd.read_csv(csv_path)
+    return pd.DataFrame()
 
 
 def _load_surface_eval(eval_dir: Path) -> dict[str, np.ndarray] | None:
@@ -115,6 +249,61 @@ def _artifact_signature(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
         else:
             sig.append((str(p), -1, -1))
     return tuple(sig)
+
+
+def _symbol_report_row(symbol: str, run_dir: Path) -> dict[str, object]:
+    eval_dir = run_dir / "evaluation"
+    bt_dir = run_dir / "backtest"
+    train_summary = _read_json(run_dir / "train_summary.json")
+    metrics = _read_json(eval_dir / "metrics.json")
+    bt_summary = _read_json(bt_dir / "summary.json")
+    return {
+        "symbol": symbol,
+        "run_name": run_dir.name,
+        "run_dir": str(run_dir.resolve()),
+        "backtest_version": bt_summary.get("backtest_version"),
+        "generated_at_utc": bt_summary.get("generated_at_utc"),
+        "train_dataset_path": train_summary.get("dataset_path"),
+        "total_pnl": bt_summary.get("total_pnl"),
+        "daily_sharpe": bt_summary.get("daily_sharpe"),
+        "max_drawdown": bt_summary.get("max_drawdown"),
+        "trades": bt_summary.get("trades"),
+        "total_fees": bt_summary.get("total_fees"),
+        "total_options_pnl_gross": bt_summary.get("total_options_pnl_gross"),
+        "total_options_pnl": bt_summary.get("total_options_pnl"),
+        "total_hedge_pnl": bt_summary.get("total_hedge_pnl"),
+        "fill_gate": bt_summary.get("fill_gate"),
+        "slippage_bps": bt_summary.get("slippage_bps"),
+        "spread_cross_fraction": bt_summary.get("spread_cross_fraction"),
+        "option_commission_per_contract": bt_summary.get("option_commission_per_contract"),
+        "option_fee_per_contract": bt_summary.get("option_fee_per_contract"),
+        "min_edge_to_cost_ratio": bt_summary.get("min_edge_to_cost_ratio"),
+        "price_rmse": metrics.get("price_rmse"),
+        "surface_iv_rmse": metrics.get("surface_iv_rmse"),
+    }
+
+
+def _collect_multi_symbol_summary(symbol_runs: dict[str, Path]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for symbol, run_dir in sorted(symbol_runs.items()):
+        if not run_dir.exists():
+            continue
+        rows.append(_symbol_report_row(symbol=symbol, run_dir=run_dir))
+    return pd.DataFrame(rows)
+
+
+def _all_symbols_report_paths(symbol_runs: dict[str, Path]) -> list[Path]:
+    paths: list[Path] = []
+    for run_dir in symbol_runs.values():
+        for rel in (
+            "train_summary.json",
+            "evaluation/metrics.json",
+            "backtest/summary.json",
+            "backtest/daily.parquet",
+            "backtest/daily.csv",
+        ):
+            paths.append(run_dir / rel)
+    return paths
 
 
 def _compute_backtest_stats(daily: pd.DataFrame, trades: pd.DataFrame, bt_summary: dict) -> dict[str, float]:
@@ -387,10 +576,10 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
     surf_path = eval_dir / "surface_predictions.npz"
 
     hist = pd.read_csv(hist_path) if hist_path.exists() else pd.DataFrame()
-    daily = pd.read_parquet(daily_path) if daily_path.exists() else pd.DataFrame()
-    trades = pd.read_parquet(trades_path) if trades_path.exists() else pd.DataFrame()
-    pred_df = pd.read_parquet(pred_path) if pred_path.exists() else pd.DataFrame()
-    noarb = pd.read_parquet(noarb_path) if noarb_path.exists() else pd.DataFrame()
+    daily = _read_parquet_or_csv(daily_path)
+    trades = _read_parquet_or_csv(trades_path)
+    pred_df = _read_parquet_or_csv(pred_path)
+    noarb = _read_parquet_or_csv(noarb_path)
     surf = np.load(surf_path, allow_pickle=False) if surf_path.exists() else None
 
     if not daily.empty:
@@ -409,6 +598,14 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
             daily["hedge_pnl"] = pd.to_numeric(daily["hedge_pnl"], errors="coerce").fillna(0.0)
         else:
             daily["hedge_pnl"] = 0.0
+        if "fees" in daily.columns:
+            daily["fees"] = pd.to_numeric(daily["fees"], errors="coerce").fillna(0.0)
+        else:
+            daily["fees"] = 0.0
+        if "options_pnl_gross" in daily.columns:
+            daily["options_pnl_gross"] = pd.to_numeric(daily["options_pnl_gross"], errors="coerce").fillna(0.0)
+        else:
+            daily["options_pnl_gross"] = daily["options_pnl"] + daily["fees"]
         for c in ("net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares"):
             if c in daily.columns:
                 daily[c] = pd.to_numeric(daily[c], errors="coerce").fillna(0.0)
@@ -530,8 +727,20 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
             ("Backtest", "Max Drawdown", bt_stats.get("max_drawdown", bt_summary.get("max_drawdown"))),
             ("Backtest", "Profit Factor", bt_stats.get("profit_factor")),
             ("Backtest", "Trades", bt_stats.get("trades", bt_summary.get("trades"))),
+            ("Backtest", "Total Fees", bt_summary.get("total_fees", float(daily["fees"].sum()) if not daily.empty else np.nan)),
+            (
+                "Backtest",
+                "Options PnL Gross",
+                bt_summary.get("total_options_pnl_gross", float(daily["options_pnl_gross"].sum()) if not daily.empty else np.nan),
+            ),
             ("Backtest", "Options PnL", float(daily["options_pnl"].sum()) if not daily.empty else np.nan),
             ("Backtest", "Hedge PnL", float(daily["hedge_pnl"].sum()) if not daily.empty else np.nan),
+            ("Backtest", "Fill Gate", bt_summary.get("fill_gate")),
+            ("Backtest", "Slippage (bps)", bt_summary.get("slippage_bps")),
+            ("Backtest", "Spread Cross Fraction", bt_summary.get("spread_cross_fraction")),
+            ("Backtest", "Option Comm/Contract", bt_summary.get("option_commission_per_contract")),
+            ("Backtest", "Option Fee/Contract", bt_summary.get("option_fee_per_contract")),
+            ("Backtest", "Min Edge/Cost Ratio", bt_summary.get("min_edge_to_cost_ratio")),
             (
                 "Backtest",
                 "Avg Hedge Risk Reduction (%)",
@@ -652,8 +861,13 @@ def _build_pdf_report_bytes(run_dir: Path) -> bytes:
         if not daily.empty:
             total_pnl = float(daily["pnl"].sum())
             hedge_total = float(daily["hedge_pnl"].sum())
+            options_gross = float(daily["options_pnl_gross"].sum())
+            total_fees = float(daily["fees"].sum())
             hedge_summary_rows = [
+                {"metric": "fees_total", "value": total_fees},
                 {"metric": "options_pnl_total", "value": float(daily["options_pnl"].sum())},
+                {"metric": "options_pnl_gross_total", "value": options_gross},
+                {"metric": "fee_drag_pct_of_options_gross", "value": (100.0 * total_fees / abs(options_gross)) if abs(options_gross) > 1e-12 else np.nan},
                 {"metric": "hedge_pnl_total", "value": hedge_total},
                 {
                     "metric": "hedge_pnl_pct_of_total",
@@ -899,6 +1113,191 @@ def _build_pdf_report_cached(run_dir_str: str, signature: tuple[tuple[str, int, 
     return _build_pdf_report_bytes(Path(run_dir_str))
 
 
+def _build_all_symbols_pdf_report_bytes(symbol_runs: dict[str, Path]) -> bytes:
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("matplotlib is required for PDF export") from exc
+
+    summary = _collect_multi_symbol_summary(symbol_runs)
+    if summary.empty:
+        raise RuntimeError("No symbol runs were found under outputs/<SYMBOL>/runs.")
+
+    for c in (
+        "total_pnl",
+        "daily_sharpe",
+        "max_drawdown",
+        "trades",
+        "total_fees",
+        "total_options_pnl_gross",
+        "total_options_pnl",
+        "total_hedge_pnl",
+        "fill_gate",
+        "slippage_bps",
+        "spread_cross_fraction",
+        "option_commission_per_contract",
+        "option_fee_per_contract",
+        "min_edge_to_cost_ratio",
+        "price_rmse",
+        "surface_iv_rmse",
+    ):
+        if c in summary.columns:
+            summary[c] = pd.to_numeric(summary[c], errors="coerce")
+
+    summary = summary.sort_values("symbol").reset_index(drop=True)
+    overview_cols = [
+        "symbol",
+        "run_name",
+        "backtest_version",
+        "total_pnl",
+        "daily_sharpe",
+        "max_drawdown",
+        "trades",
+        "total_fees",
+        "total_options_pnl_gross",
+        "total_options_pnl",
+        "total_hedge_pnl",
+    ]
+    cost_cols = [
+        "symbol",
+        "fill_gate",
+        "slippage_bps",
+        "spread_cross_fraction",
+        "option_commission_per_contract",
+        "option_fee_per_contract",
+        "min_edge_to_cost_ratio",
+    ]
+
+    buf = BytesIO()
+    with PdfPages(buf) as pdf:
+        # Page 1: executive summary
+        fig = plt.figure(figsize=(11, 8.5))
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.3])
+        ax_l = fig.add_subplot(gs[0, 0])
+        ax_r = fig.add_subplot(gs[0, 1])
+        ax_l.axis("off")
+        lines = [
+            "Scope: all symbols discovered in outputs/<SYMBOL>/runs",
+            f"Generated (UTC): {pd.Timestamp.utcnow().isoformat()}",
+            f"Symbols: {', '.join(summary['symbol'].astype(str).tolist())}",
+            f"Total symbols: {len(summary)}",
+            f"Aggregate total PnL: {_format_num(float(summary['total_pnl'].sum()), 2)}",
+            f"Aggregate total fees: {_format_num(float(summary['total_fees'].sum()), 2)}",
+            f"Median daily Sharpe: {_format_num(float(summary['daily_sharpe'].median()), 3)}",
+        ]
+        ax_l.set_title("Portfolio Report", fontsize=12, loc="left")
+        ax_l.text(0.01, 0.98, "\n".join(lines), va="top", ha="left", fontsize=10)
+        _render_pdf_table(ax_r, "Cross-Symbol Overview", summary[overview_cols], max_rows=14)
+        fig.suptitle("IV Dynamics Multi-Symbol Report", fontsize=16, y=0.99)
+        fig.tight_layout()
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        # Page 2: PnL and Sharpe comparisons
+        fig, axes = plt.subplots(2, 1, figsize=(11, 8.2))
+        order = summary.sort_values("total_pnl", ascending=False)["symbol"].astype(str).tolist()
+        pnl_df = summary.set_index("symbol").loc[order].reset_index()
+        colors = np.where(pnl_df["total_pnl"] >= 0.0, "#0f766e", "#b91c1c")
+        axes[0].bar(pnl_df["symbol"], pnl_df["total_pnl"], color=colors, alpha=0.9)
+        axes[0].set_title("Total PnL by Symbol")
+        axes[0].set_ylabel("PnL")
+        axes[0].tick_params(axis="x", labelrotation=0)
+
+        axes[1].bar(pnl_df["symbol"], pnl_df["daily_sharpe"], color="#334155", alpha=0.9)
+        axes[1].set_title("Daily Sharpe by Symbol")
+        axes[1].set_ylabel("Sharpe")
+        axes[1].tick_params(axis="x", labelrotation=0)
+        fig.tight_layout()
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        # Page 3: cost and execution setup comparison
+        fig = plt.figure(figsize=(11, 8.5))
+        gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 1.0])
+        ax0 = fig.add_subplot(gs[0, 0])
+        ax1 = fig.add_subplot(gs[1, 0])
+        _render_pdf_table(ax0, "Cost & Execution Parameters", summary[cost_cols], max_rows=20)
+        fee_view = summary[
+            [
+                "symbol",
+                "total_fees",
+                "total_options_pnl_gross",
+                "total_options_pnl",
+                "total_hedge_pnl",
+            ]
+        ].copy()
+        fee_view["fee_drag_pct_of_options_gross"] = np.where(
+            fee_view["total_options_pnl_gross"].abs() > 1e-12,
+            100.0 * fee_view["total_fees"] / fee_view["total_options_pnl_gross"].abs(),
+            np.nan,
+        )
+        _render_pdf_table(ax1, "Cost Outcomes", fee_view, max_rows=20)
+        fig.suptitle("Cost and Execution Diagnostics", fontsize=14)
+        fig.tight_layout()
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        # Symbol detail pages
+        for _, row in summary.iterrows():
+            fig = plt.figure(figsize=(11, 8.5))
+            gs = fig.add_gridspec(3, 1, height_ratios=[0.55, 1.0, 1.0])
+            ax_h = fig.add_subplot(gs[0, 0])
+            ax_a = fig.add_subplot(gs[1, 0])
+            ax_b = fig.add_subplot(gs[2, 0])
+            ax_h.axis("off")
+            header_lines = [
+                f"Symbol: {row.get('symbol', 'n/a')}",
+                f"Run: {row.get('run_name', 'n/a')}",
+                f"Backtest version: {row.get('backtest_version', 'n/a')}",
+                f"Generated UTC: {row.get('generated_at_utc', 'n/a')}",
+                f"Run path: {row.get('run_dir', 'n/a')}",
+            ]
+            ax_h.text(0.01, 0.95, "\n".join(header_lines), va="top", ha="left", fontsize=10)
+            perf = pd.DataFrame(
+                [
+                    {"metric": "total_pnl", "value": row.get("total_pnl")},
+                    {"metric": "daily_sharpe", "value": row.get("daily_sharpe")},
+                    {"metric": "max_drawdown", "value": row.get("max_drawdown")},
+                    {"metric": "trades", "value": row.get("trades")},
+                    {"metric": "price_rmse", "value": row.get("price_rmse")},
+                    {"metric": "surface_iv_rmse", "value": row.get("surface_iv_rmse")},
+                ]
+            )
+            costs = pd.DataFrame(
+                [
+                    {"metric": "total_fees", "value": row.get("total_fees")},
+                    {"metric": "total_options_pnl_gross", "value": row.get("total_options_pnl_gross")},
+                    {"metric": "total_options_pnl", "value": row.get("total_options_pnl")},
+                    {"metric": "total_hedge_pnl", "value": row.get("total_hedge_pnl")},
+                    {"metric": "fill_gate", "value": row.get("fill_gate")},
+                    {"metric": "slippage_bps", "value": row.get("slippage_bps")},
+                    {"metric": "spread_cross_fraction", "value": row.get("spread_cross_fraction")},
+                    {"metric": "option_commission_per_contract", "value": row.get("option_commission_per_contract")},
+                    {"metric": "option_fee_per_contract", "value": row.get("option_fee_per_contract")},
+                    {"metric": "min_edge_to_cost_ratio", "value": row.get("min_edge_to_cost_ratio")},
+                ]
+            )
+            _render_pdf_table(ax_a, "Performance", perf, max_rows=18)
+            _render_pdf_table(ax_b, "Costs & Execution", costs, max_rows=20)
+            fig.suptitle(f"Symbol Detail: {row.get('symbol', 'n/a')}", fontsize=14)
+            fig.tight_layout()
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+
+    buf.seek(0)
+    return buf.getvalue()
+
+
+@st.cache_data(show_spinner=False)
+def _build_all_symbols_pdf_report_cached(
+    symbol_runs_items: tuple[tuple[str, str], ...], signature: tuple[tuple[str, int, int], ...]
+) -> bytes:
+    _ = signature
+    symbol_runs = {symbol: Path(run_dir) for symbol, run_dir in symbol_runs_items}
+    return _build_all_symbols_pdf_report_bytes(symbol_runs)
+
+
 def _render_backtest_tab(bt_dir: Path) -> None:
     st.caption("Performance evidence focused on returns, risk, and distribution stability.")
 
@@ -910,8 +1309,8 @@ def _render_backtest_tab(bt_dir: Path) -> None:
         st.info("Backtest artifacts not found. Run `ivdyn backtest ...` first.")
         return
 
-    daily = pd.read_parquet(daily_path)
-    trades = pd.read_parquet(trades_path) if trades_path.exists() else pd.DataFrame()
+    daily = _read_parquet_or_csv(daily_path)
+    trades = _read_parquet_or_csv(trades_path)
     bt_summary = _read_json(summary_path)
 
     daily["date"] = pd.to_datetime(daily["date"])
@@ -925,6 +1324,14 @@ def _render_backtest_tab(bt_dir: Path) -> None:
         daily["hedge_pnl"] = pd.to_numeric(daily["hedge_pnl"], errors="coerce").fillna(0.0)
     else:
         daily["hedge_pnl"] = 0.0
+    if "fees" in daily.columns:
+        daily["fees"] = pd.to_numeric(daily["fees"], errors="coerce").fillna(0.0)
+    else:
+        daily["fees"] = 0.0
+    if "options_pnl_gross" in daily.columns:
+        daily["options_pnl_gross"] = pd.to_numeric(daily["options_pnl_gross"], errors="coerce").fillna(0.0)
+    else:
+        daily["options_pnl_gross"] = daily["options_pnl"] + daily["fees"]
     for c in ("net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares"):
         if c in daily.columns:
             daily[c] = pd.to_numeric(daily[c], errors="coerce").fillna(0.0)
@@ -953,6 +1360,65 @@ def _render_backtest_tab(bt_dir: Path) -> None:
     c6.metric("Expectancy/Trade", _format_num(stats.get("expectancy_per_trade"), 2))
     c7.metric("Best Day", _format_num(stats.get("best_day"), 2))
     c8.metric("Worst Day", _format_num(stats.get("worst_day"), 2))
+
+    st.markdown("#### Costs & Execution")
+    total_fees = float(bt_summary.get("total_fees", daily["fees"].sum()))
+    options_gross = float(bt_summary.get("total_options_pnl_gross", daily["options_pnl_gross"].sum()))
+    options_net = float(bt_summary.get("total_options_pnl", daily["options_pnl"].sum()))
+    fee_drag_pct = (100.0 * total_fees / abs(options_gross)) if abs(options_gross) > 1e-12 else np.nan
+
+    ec1, ec2, ec3, ec4 = st.columns(4)
+    ec1.metric("Total Fees", _format_num(total_fees, 2))
+    ec2.metric("Options PnL (Gross)", _format_num(options_gross, 2))
+    ec3.metric("Options PnL (Net)", _format_num(options_net, 2))
+    ec4.metric("Fee Drag vs Gross", f"{_format_num(fee_drag_pct, 2)}%")
+
+    ec5, ec6, ec7, ec8 = st.columns(4)
+    ec5.metric("Option Comm/Contract", _format_num(bt_summary.get("option_commission_per_contract"), 4))
+    ec6.metric("Option Fee/Contract", _format_num(bt_summary.get("option_fee_per_contract"), 4))
+    ec7.metric("Slippage (bps)", _format_num(bt_summary.get("slippage_bps"), 2))
+    ec8.metric("Spread Cross Fraction", _format_num(bt_summary.get("spread_cross_fraction"), 3))
+
+    execution_rows = [
+        ("strategy_mode", bt_summary.get("strategy_mode")),
+        ("fill_model", bt_summary.get("fill_model")),
+        ("fill_gate", bt_summary.get("fill_gate")),
+        ("min_edge_to_cost_ratio", bt_summary.get("min_edge_to_cost_ratio")),
+        ("max_trades_per_day", bt_summary.get("max_trades_per_day")),
+        ("signal_abs_gate", bt_summary.get("signal_abs_gate")),
+    ]
+    exec_df = pd.DataFrame(execution_rows, columns=["metric", "value"])
+    st.dataframe(exec_df, use_container_width=True, hide_index=True)
+
+    fee_chart = (
+        alt.Chart(daily)
+        .mark_bar(color="#6b8f2a", opacity=0.65)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("fees:Q", title="Daily Fees"),
+            tooltip=[
+                "date:T",
+                alt.Tooltip("fees:Q", title="Fees"),
+                alt.Tooltip("options_pnl_gross:Q", title="Options PnL gross"),
+                alt.Tooltip("options_pnl:Q", title="Options PnL net"),
+            ],
+        )
+    )
+    net_options_line = (
+        alt.Chart(daily)
+        .mark_line(color="#111827", point=True)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("options_pnl:Q", title="Options PnL (Net)"),
+            tooltip=["date:T", alt.Tooltip("options_pnl:Q", title="Options PnL net")],
+        )
+    )
+    st.altair_chart(
+        alt.layer(fee_chart, net_options_line)
+        .resolve_scale(y="independent")
+        .properties(height=230, title="Daily Fees vs Net Options PnL"),
+        use_container_width=True,
+    )
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -1163,7 +1629,7 @@ def _render_prediction_tab(eval_dir: Path, metrics: dict) -> None:
         st.info("No evaluation predictions found.")
         return
 
-    pred = pd.read_parquet(pred_path)
+    pred = _read_parquet_or_csv(pred_path)
     pred_test = pred[pred["split"] == "test"].copy() if "split" in pred.columns else pred.copy()
     if pred_test.empty:
         st.info("No prediction records available.")
@@ -1344,7 +1810,7 @@ def _render_fits_tab(eval_dir: Path, metrics: dict) -> None:
         st.altair_chart(fit_chart, use_container_width=True)
 
     if noarb_path.exists():
-        noarb = pd.read_parquet(noarb_path)
+        noarb = _read_parquet_or_csv(noarb_path)
         noarb["date"] = pd.to_datetime(noarb["date"])
         long = noarb.melt(
             id_vars=["date"],
@@ -1368,7 +1834,7 @@ def _render_fits_tab(eval_dir: Path, metrics: dict) -> None:
 
 def render_dashboard(run_dir: Path) -> None:
     st.title("IV Dynamics Research Console")
-    st.caption("Focused dashboard: backtest evidence, surface fit overlays, prediction errors, training diagnostics, and fit quality.")
+    st.caption("Professional research dashboard for returns, fit quality, execution realism, and cross-symbol reporting.")
 
     if not run_dir.exists():
         st.error(f"Run directory does not exist: {run_dir}")
@@ -1380,12 +1846,31 @@ def render_dashboard(run_dir: Path) -> None:
     train_summary = _read_json(run_dir / "train_summary.json")
     metrics = _read_json(eval_dir / "metrics.json")
     bt_summary = _read_json(bt_dir / "summary.json")
+    symbol = _extract_symbol_from_run_dir(run_dir) or str(bt_summary.get("underlying_symbol", "n/a")).upper()
+    generated_at = str(bt_summary.get("generated_at_utc", "n/a"))
+    backtest_version = str(bt_summary.get("backtest_version", "n/a"))
+
+    st.markdown(
+        (
+            "<div class='console-hero'>"
+            f"<div class='title'>Run: {run_dir.name} ({symbol})</div>"
+            f"<div class='meta'>Backtest version: {backtest_version} | Generated UTC: {generated_at}</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
     top1, top2, top3, top4 = st.columns(4)
     top1.metric("Price RMSE", _format_num(metrics.get("price_rmse")))
     top2.metric("Surface RMSE", _format_num(metrics.get("surface_iv_rmse")))
     top3.metric("Backtest PnL", _format_num(bt_summary.get("total_pnl"), 2))
     top4.metric("Backtest Sharpe", _format_num(bt_summary.get("daily_sharpe"), 3))
+
+    top5, top6, top7, top8 = st.columns(4)
+    top5.metric("Total Fees", _format_num(bt_summary.get("total_fees"), 2))
+    top6.metric("Fill Gate", _format_num(bt_summary.get("fill_gate"), 2))
+    top7.metric("Slippage (bps)", _format_num(bt_summary.get("slippage_bps"), 2))
+    top8.metric("Spread Cross", _format_num(bt_summary.get("spread_cross_fraction"), 3))
 
     report_paths = [
         run_dir / "train_history.csv",
@@ -1399,11 +1884,34 @@ def render_dashboard(run_dir: Path) -> None:
         bt_dir / "trades.parquet",
         bt_dir / "summary.json",
     ]
+    symbol_runs = _discover_latest_runs_by_symbol(Path("outputs"))
+    all_symbols_df = _collect_multi_symbol_summary(symbol_runs)
+    all_symbols_items = tuple((sym, str(path.resolve())) for sym, path in sorted(symbol_runs.items()))
+    all_symbols_paths = _all_symbols_report_paths(symbol_runs)
+
     with st.expander("Report", expanded=False):
         st.markdown(
-            "<div class='block-note'>Comprehensive export: full backtest, surface overlays, prediction diagnostics, training diagnostics, fits, and raw summary payloads.</div>",
+            "<div class='block-note'>Comprehensive export options: single-run detailed PDF and all-symbol portfolio PDF with costs/execution settings.</div>",
             unsafe_allow_html=True,
         )
+        if not all_symbols_df.empty:
+            st.dataframe(
+                all_symbols_df[
+                    [
+                        "symbol",
+                        "run_name",
+                        "backtest_version",
+                        "total_pnl",
+                        "daily_sharpe",
+                        "total_fees",
+                        "slippage_bps",
+                        "spread_cross_fraction",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
         try:
             pdf_bytes = _build_pdf_report_cached(str(run_dir.resolve()), _artifact_signature(report_paths))
             st.download_button(
@@ -1414,6 +1922,22 @@ def render_dashboard(run_dir: Path) -> None:
             )
         except Exception as exc:
             st.warning(f"PDF export unavailable: {exc}")
+        if all_symbols_items:
+            try:
+                portfolio_pdf = _build_all_symbols_pdf_report_cached(
+                    all_symbols_items,
+                    _artifact_signature(all_symbols_paths),
+                )
+                st.download_button(
+                    label="Download All Symbols PDF",
+                    data=portfolio_pdf,
+                    file_name="ivdyn_all_symbols_report.pdf",
+                    mime="application/pdf",
+                )
+            except Exception as exc:
+                st.warning(f"All-symbol PDF export unavailable: {exc}")
+        else:
+            st.info("No symbol runs discovered for all-symbol report export.")
 
     tabs = st.tabs(["Backtest & PnL", "Surface Overlays", "Prediction Errors", "Training Diagnostics", "Fits"])
 

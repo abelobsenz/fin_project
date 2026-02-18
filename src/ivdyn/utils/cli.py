@@ -166,13 +166,21 @@ def _backtest_command(ns: Any) -> None:
         BacktestConfig(
             run_dir=run_dir,
             dataset_path=dataset,
+            start_date=getattr(ns, "start_date", None),
+            end_date=getattr(ns, "end_date", None),
             device=ns.device,
             num_workers=ns.num_workers,
             inference_batch_size=ns.inference_batch_size,
             initial_capital=ns.initial_capital,
             fill_gate=ns.fill_gate,
+            fill_model=getattr(ns, "fill_model", "expected"),
             slippage_bps=ns.slippage_bps,
+            spread_cross_fraction=getattr(ns, "spread_cross_fraction", 0.75),
+            option_commission_per_contract=getattr(ns, "option_commission_per_contract", 0.65),
+            option_fee_per_contract=getattr(ns, "option_fee_per_contract", 0.05),
+            min_edge_to_cost_ratio=getattr(ns, "min_edge_to_cost_ratio", 1.2),
             max_trades_per_day=ns.max_trades_per_day,
+            volume_participation_rate=getattr(ns, "volume_participation_rate", 0.01),
             selector_long_score_scale=getattr(ns, "long_score_scale", 0.0),
             selector_allow_long_puts=bool(getattr(ns, "allow_long_puts", True)),
             signal_abs_gate=ns.signal_abs_gate,
@@ -193,7 +201,7 @@ def _backtest_command(ns: Any) -> None:
             vertical_wing_rich_signal_penalty=getattr(ns, "vertical_wing_rich_signal_penalty", 0.75),
             vertical_skip_if_no_wing=bool(getattr(ns, "vertical_skip_if_no_wing", True)),
             hedge_underlying_delta=bool(getattr(ns, "hedge_underlying_delta", False)),
-            hedge_underlying_ratio=getattr(ns, "hedge_underlying_ratio", 1.0),
+            hedge_underlying_ratio=getattr(ns, "hedge_underlying_ratio", 0.5),
             hedge_underlying_min_abs_shares=getattr(ns, "hedge_underlying_min_abs_shares", 25.0),
             hedge_underlying_max_shares=getattr(ns, "hedge_underlying_max_shares", 5000),
             hedge_underlying_slippage_bps=getattr(ns, "hedge_underlying_slippage_bps", 1.0),
@@ -864,12 +872,40 @@ def _build_parser() -> ArgumentParser:
     p = sub.add_parser("backtest")
     p.add_argument("--run-dir", default=None)
     p.add_argument("--dataset", default=None)
+    p.add_argument("--start-date", default=None, help="Optional inclusive start date filter (YYYY-MM-DD).")
+    p.add_argument("--end-date", default=None, help="Optional inclusive end date filter (YYYY-MM-DD).")
     p.add_argument("--device", default=None)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--inference-batch-size", type=int, default=65536)
     p.add_argument("--initial-capital", type=float, default=10000.0)
-    p.add_argument("--fill-gate", type=float, default=0.65)
-    p.add_argument("--slippage-bps", type=float, default=7.5)
+    p.add_argument("--fill-gate", type=float, default=0.45)
+    p.add_argument(
+        "--fill-model",
+        choices=["assume", "expected"],
+        default="expected",
+        help="How to apply fill probability. 'assume' is optimistic (trade always fills). 'expected' scales PnL/fees by fill_prob.",
+    )
+    p.add_argument("--slippage-bps", type=float, default=10.0)
+    p.add_argument(
+        "--spread-cross-fraction",
+        type=float,
+        default=0.75,
+        help="Fraction of half-spread paid per fill (0=mid, 1=at touch). Applied on entry and exit.",
+    )
+    p.add_argument("--option-commission-per-contract", type=float, default=0.65)
+    p.add_argument("--option-fee-per-contract", type=float, default=0.05)
+    p.add_argument(
+        "--min-edge-to-cost-ratio",
+        type=float,
+        default=1.75,
+        help="Require estimated edge to exceed estimated round-trip costs by this ratio before selecting trades.",
+    )
+    p.add_argument(
+        "--volume-participation-rate",
+        type=float,
+        default=0.02,
+        help="Target fraction of per-contract daily volume used as a participation cap.",
+    )
     p.add_argument(
         "--long-score-scale",
         type=float,
@@ -913,7 +949,7 @@ def _build_parser() -> ArgumentParser:
     p.add_argument("--vertical-wing-width-pct-min", type=float, default=0.01, help="Minimum wing distance as a fraction of spot.")
     p.add_argument("--vertical-wing-width-pct-max", type=float, default=0.08, help="Maximum wing distance as a fraction of spot.")
     p.add_argument("--vertical-wing-max-premium-ratio", type=float, default=0.35, help="Require wing mid_now <= ratio * anchor mid_now.")
-    p.add_argument("--vertical-wing-fill-gate", type=float, default=0.50)
+    p.add_argument("--vertical-wing-fill-gate", type=float, default=0.6)
     p.add_argument("--vertical-wing-max-rel-spread", type=float, default=0.15)
     p.add_argument("--vertical-wing-min-moneyness", type=float, default=0.75)
     p.add_argument("--vertical-wing-max-moneyness", type=float, default=1.30)
@@ -932,10 +968,22 @@ def _build_parser() -> ArgumentParser:
     )
     p.set_defaults(vertical_skip_if_no_wing=True)
 
-    p.add_argument("--hedge-underlying-delta", action="store_true", default=True, help="If set, add a daily underlying delta-hedge sized from BS deltas using the observed IV surface.")
-    p.add_argument("--hedge-underlying-ratio", type=float, default=0.5, help="0=off. 1.0=full delta neutralization; 0.5=half hedge.")
-    p.add_argument("--hedge-underlying-min-abs-shares", type=float, default=3.0, help="Do not place a hedge trade unless |shares| exceeds this threshold.")
-    p.add_argument("--hedge-underlying-max-shares", type=int, default=50)
+    p.add_argument(
+        "--hedge-underlying-delta",
+        dest="hedge_underlying_delta",
+        action="store_true",
+        help="Enable daily underlying delta hedge.",
+    )
+    p.add_argument(
+        "--no-hedge-underlying-delta",
+        dest="hedge_underlying_delta",
+        action="store_false",
+        help="Disable daily underlying delta hedge.",
+    )
+    p.set_defaults(hedge_underlying_delta=True)
+    p.add_argument("--hedge-underlying-ratio", type=float, default=1.0, help="0=off. 1.0=full delta neutralization; 0.5=half hedge.")
+    p.add_argument("--hedge-underlying-min-abs-shares", type=float, default=20.0, help="Do not place a hedge trade unless |shares| exceeds this threshold.")
+    p.add_argument("--hedge-underlying-max-shares", type=int, default=200)
     p.add_argument("--hedge-underlying-slippage-bps", type=float, default=1.0)
     p.set_defaults(func=_backtest_command)
 
