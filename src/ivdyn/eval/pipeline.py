@@ -30,79 +30,7 @@ def _load_dataset(path: Path) -> dict[str, np.ndarray]:
         out[k] = arr
     return out
 
-
-def _default_split(n_dates: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    i_train = int(n_dates * 0.7)
-    i_val = int(n_dates * 0.85)
-    return np.arange(i_train), np.arange(i_train, i_val), np.arange(i_val, n_dates)
-
-
-def _sanitize_split_idx(raw: object, n_dates: int) -> np.ndarray:
-    arr = np.asarray(raw, dtype=np.int32).reshape(-1)
-    if arr.size == 0:
-        return arr
-    arr = arr[(arr >= 0) & (arr < int(n_dates))]
-    if arr.size == 0:
-        return arr
-    return np.unique(arr.astype(np.int32))
-
-
-def _disjoint_splits(
-    train_idx: np.ndarray,
-    val_idx: np.ndarray,
-    test_idx: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    test_idx = np.unique(test_idx.astype(np.int32))
-    val_idx = np.unique(val_idx.astype(np.int32))
-    val_idx = val_idx[~np.isin(val_idx, test_idx)]
-    train_idx = np.unique(train_idx.astype(np.int32))
-    train_idx = train_idx[(~np.isin(train_idx, test_idx)) & (~np.isin(train_idx, val_idx))]
-    return train_idx, val_idx, test_idx
-
-
-def _load_split(
-    run_dir: Path,
-    n_dates: int,
-    dates: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
-    split = run_dir / "split_info.json"
-    if not split.exists():
-        tr, va, te = _default_split(n_dates)
-        return tr, va, te, "default_no_split_info"
-
-    try:
-        payload = json.loads(split.read_text(encoding="utf-8"))
-    except Exception:
-        tr, va, te = _default_split(n_dates)
-        return tr, va, te, "default_split_read_error"
-
-    train_raw = np.asarray(payload.get("train_date_idx", []), dtype=np.int32).reshape(-1)
-    val_raw = np.asarray(payload.get("val_date_idx", []), dtype=np.int32).reshape(-1)
-    test_raw = np.asarray(payload.get("test_date_idx", []), dtype=np.int32).reshape(-1)
-
-    train_idx = _sanitize_split_idx(train_raw, n_dates)
-    val_idx = _sanitize_split_idx(val_raw, n_dates)
-    test_idx = _sanitize_split_idx(test_raw, n_dates)
-    train_idx, val_idx, test_idx = _disjoint_splits(train_idx, val_idx, test_idx)
-
-    orig_total = int(train_raw.size + val_raw.size + test_raw.size)
-    kept_total = int(train_idx.size + val_idx.size + test_idx.size)
-    if orig_total > 0 and kept_total == orig_total:
-        return train_idx, val_idx, test_idx, "split_info_idx"
-
-    # Cross-dataset evaluation can have different n_dates than training.
-    # When available, map split by date labels from split_info to current dataset dates.
-    date_to_idx = {str(d): i for i, d in enumerate(np.asarray(dates).astype(str))}
-    if date_to_idx:
-        tr_d = _sanitize_split_idx([date_to_idx[d] for d in payload.get("train_dates", []) if d in date_to_idx], n_dates)
-        va_d = _sanitize_split_idx([date_to_idx[d] for d in payload.get("val_dates", []) if d in date_to_idx], n_dates)
-        te_d = _sanitize_split_idx([date_to_idx[d] for d in payload.get("test_dates", []) if d in date_to_idx], n_dates)
-        tr_d, va_d, te_d = _disjoint_splits(tr_d, va_d, te_d)
-        if int(tr_d.size + va_d.size + te_d.size) > 0:
-            return tr_d, va_d, te_d, "split_info_dates_mapped"
-
-    tr, va, te = _default_split(n_dates)
-    return tr, va, te, "default_split_mismatch"
+# Evaluation reports are produced over the full supplied dataset.
 
 
 def _resolve_num_workers(requested: int, n_tasks: int) -> int:
@@ -167,18 +95,21 @@ def evaluate(
     contract_spot = ds["contract_spot"].astype(np.float32)
     contract_mid_norm = contract_mid / np.clip(contract_spot, 1e-6, None)
 
-    train_dates, val_dates, test_dates, split_source = _load_split(run_dir, n_dates, dates)
-
-    with torch.no_grad():
+    test_dates = np.arange(int(n_dates), dtype=np.int32)
+    # Use inference_mode for lower overhead than no_grad during evaluation.
+    with torch.inference_mode():
         sf = torch.as_tensor(surface_scaled, dtype=torch.float32, device=dev)
         mu, _ = model.encode(sf)
         recon_scaled = model.decode(mu)
+        z_all_t = torch.as_tensor(mu, dtype=torch.float32, device=dev)
+        ctx_t = torch.as_tensor(context_scaled, dtype=torch.float32, device=dev)
+        z_next_t = model.forward_dynamics(z_all_t, ctx_t)
+        forecast_scaled = model.decode(z_next_t)
 
         recon_raw = bundle.surface_scaler.inverse_transform(to_numpy(recon_scaled)).reshape(iv_surface_obs.shape)
+        forecast_raw = bundle.surface_scaler.inverse_transform(to_numpy(forecast_scaled)).reshape(iv_surface_obs.shape)
         z_all = to_numpy(mu)
-        z_all_t = torch.as_tensor(z_all, dtype=torch.float32, device=dev)
-        ctx_t = torch.as_tensor(context_scaled, dtype=torch.float32, device=dev)
-        z_next = to_numpy(model.forward_dynamics(z_all_t, ctx_t))
+        z_next = to_numpy(z_next_t)
 
         cf = torch.as_tensor(contract_scaled, dtype=torch.float32, device=dev)
         z_contract = torch.as_tensor(z_all[contract_date_idx], dtype=torch.float32, device=dev)
@@ -237,6 +168,12 @@ def evaluate(
         metrics["price_r2_source"] = "next_day"
         metrics["next_return_directional_acc"] = float(np.mean(np.sign(r_next_pred) == np.sign(r_next_true)))
         metrics["next_return_corr"] = float(np.corrcoef(r_next_pred, r_next_true)[0, 1]) if len(r_next_true) > 1 else float("nan")
+
+        # Baseline: "carry" (predict tomorrow's option price is today's).
+        y_next_base = contract_price_target[mask_test_next]
+        metrics["next_price_rmse_baseline_midcarry"] = rmse(y_next_base, y_next_true)
+        metrics["next_price_mae_baseline_midcarry"] = mae(y_next_base, y_next_true)
+        metrics["next_price_r2_baseline_midcarry"] = r2(y_next_base, y_next_true)
     else:
         metrics["next_test_contracts"] = 0
         metrics["next_price_rmse"] = float("nan")
@@ -248,10 +185,48 @@ def evaluate(
         metrics["next_return_directional_acc"] = float("nan")
         metrics["next_return_corr"] = float("nan")
 
+    # Baseline for execution: constant probability = empirical positive rate.
+    if len(e_true) > 0 and np.isfinite(metrics.get("exec_positive_rate", np.nan)):
+        p0 = float(np.clip(metrics["exec_positive_rate"], 1e-6, 1.0 - 1e-6))
+        metrics["exec_brier_baseline_constant"] = brier_score(np.full_like(e_true, p0, dtype=float), e_true)
+    else:
+        metrics["exec_brier_baseline_constant"] = float("nan")
+
     pred_test = recon_raw[test_dates]
     obs_test = iv_surface_obs[test_dates]
+    # Same-day reconstruction quality (helps diagnose representation learning).
     metrics["surface_iv_rmse"] = rmse(pred_test, obs_test)
     metrics["surface_iv_mae"] = mae(pred_test, obs_test)
+    metrics["surface_recon_iv_rmse"] = metrics["surface_iv_rmse"]
+    metrics["surface_recon_iv_mae"] = metrics["surface_iv_mae"]
+
+    # 1-step ahead surface forecast quality (this is the metric that matters for
+    # trading and any forward-looking strategy).
+    forecast_entry_idx = test_dates[test_dates < (n_dates - 1)]
+    forecast_target_idx = forecast_entry_idx + 1
+    metrics["surface_forecast_days"] = int(len(forecast_entry_idx))
+    if len(forecast_entry_idx) > 0:
+        pred_forecast = forecast_raw[forecast_entry_idx]
+        obs_forecast = iv_surface_obs[forecast_target_idx]
+        metrics["surface_forecast_iv_rmse"] = rmse(pred_forecast, obs_forecast)
+        metrics["surface_forecast_iv_mae"] = mae(pred_forecast, obs_forecast)
+
+        # Baseline: persistence (tomorrow's surface = today's surface).
+        base_forecast = iv_surface_obs[forecast_entry_idx]
+        metrics["surface_forecast_iv_rmse_baseline_persistence"] = rmse(base_forecast, obs_forecast)
+        metrics["surface_forecast_iv_mae_baseline_persistence"] = mae(base_forecast, obs_forecast)
+
+        mse_model = float(np.mean((pred_forecast - obs_forecast) ** 2))
+        mse_base = float(np.mean((base_forecast - obs_forecast) ** 2))
+        metrics["surface_forecast_skill_mse_vs_persistence"] = (
+            float(1.0 - (mse_model / mse_base)) if mse_base > 0 else float("nan")
+        )
+    else:
+        metrics["surface_forecast_iv_rmse"] = float("nan")
+        metrics["surface_forecast_iv_mae"] = float("nan")
+        metrics["surface_forecast_iv_rmse_baseline_persistence"] = float("nan")
+        metrics["surface_forecast_iv_mae_baseline_persistence"] = float("nan")
+        metrics["surface_forecast_skill_mse_vs_persistence"] = float("nan")
 
     workers = _resolve_num_workers(num_workers, len(test_dates))
     parallel_backend = "sequential"
@@ -289,7 +264,34 @@ def evaluate(
     metrics["calendar_violation_pred_mean"] = float(np.mean(cal_pred)) if len(cal_pred) else float("nan")
     metrics["butterfly_violation_obs_mean"] = float(np.mean(bfly_obs)) if len(bfly_obs) else float("nan")
     metrics["butterfly_violation_pred_mean"] = float(np.mean(bfly_pred)) if len(bfly_pred) else float("nan")
-    metrics["split_source"] = split_source
+
+    # No-arbitrage diagnostics for 1-step ahead forecasts (t -> t+1) on test.
+    if len(forecast_entry_idx) > 0:
+        pred_forecast = forecast_raw[forecast_entry_idx]
+        obs_forecast = iv_surface_obs[forecast_target_idx]
+
+        rows_f = [
+            _noarb_for_day(obs_forecast[i], pred_forecast[i], x_grid, tenor_days) for i in range(len(forecast_entry_idx))
+        ]
+        cal_obs_f = np.array([r[0] for r in rows_f], dtype=np.float32)
+        cal_pred_f = np.array([r[1] for r in rows_f], dtype=np.float32)
+        bfly_obs_f = np.array([r[2] for r in rows_f], dtype=np.float32)
+        bfly_pred_f = np.array([r[3] for r in rows_f], dtype=np.float32)
+
+        metrics["calendar_violation_forecast_obs_mean"] = float(np.mean(cal_obs_f)) if len(cal_obs_f) else float("nan")
+        metrics["calendar_violation_forecast_pred_mean"] = float(np.mean(cal_pred_f)) if len(cal_pred_f) else float("nan")
+        metrics["butterfly_violation_forecast_obs_mean"] = float(np.mean(bfly_obs_f)) if len(bfly_obs_f) else float("nan")
+        metrics["butterfly_violation_forecast_pred_mean"] = float(np.mean(bfly_pred_f)) if len(bfly_pred_f) else float("nan")
+    else:
+        cal_obs_f = np.array([], dtype=np.float32)
+        cal_pred_f = np.array([], dtype=np.float32)
+        bfly_obs_f = np.array([], dtype=np.float32)
+        bfly_pred_f = np.array([], dtype=np.float32)
+        metrics["calendar_violation_forecast_obs_mean"] = float("nan")
+        metrics["calendar_violation_forecast_pred_mean"] = float("nan")
+        metrics["butterfly_violation_forecast_obs_mean"] = float("nan")
+        metrics["butterfly_violation_forecast_pred_mean"] = float("nan")
+
     metrics["num_workers"] = workers
     metrics["parallel_backend"] = parallel_backend
 
@@ -311,11 +313,6 @@ def evaluate(
             "pred_next_return": pred_next_return,
             "target_fill": contract_fill_target,
             "pred_fill_prob": exec_prob,
-            "split": np.where(
-                np.isin(contract_date_idx, test_dates),
-                "test",
-                np.where(np.isin(contract_date_idx, val_dates), "val", "train"),
-            ),
         }
     )
     contract_df.to_parquet(eval_dir / "contract_predictions.parquet", index=False)
@@ -331,9 +328,21 @@ def evaluate(
     )
     noarb_dates.to_parquet(eval_dir / "noarb_test_dates.parquet", index=False)
 
+    if len(forecast_entry_idx) > 0:
+        noarb_forecast = pd.DataFrame(
+            {
+                "date_entry": dates[forecast_entry_idx],
+                "date_target": dates[forecast_target_idx],
+                "calendar_obs": cal_obs_f,
+                "calendar_pred": cal_pred_f,
+                "butterfly_obs": bfly_obs_f,
+                "butterfly_pred": bfly_pred_f,
+            }
+        )
+        noarb_forecast.to_parquet(eval_dir / "noarb_forecast_test_dates.parquet", index=False)
+
     latent = pd.DataFrame(z_all, columns=[f"z_{i}" for i in range(z_all.shape[1])])
     latent.insert(0, "date", dates)
-    latent.insert(1, "split", np.where(np.isin(np.arange(n_dates), test_dates), "test", np.where(np.isin(np.arange(n_dates), val_dates), "val", "train")))
     latent.to_parquet(eval_dir / "latent_states.parquet", index=False)
 
     np.savez_compressed(
@@ -341,9 +350,12 @@ def evaluate(
         dates=dates,
         iv_surface_obs=iv_surface_obs,
         iv_surface_pred=recon_raw.astype(np.float32),
+        iv_surface_forecast=forecast_raw.astype(np.float32),
         x_grid=x_grid,
         tenor_days=tenor_days,
         test_date_index=test_dates,
+        forecast_entry_index=forecast_entry_idx,
+        forecast_target_index=forecast_target_idx,
     )
 
     (eval_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")

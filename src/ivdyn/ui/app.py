@@ -1164,9 +1164,9 @@ def _render_prediction_tab(eval_dir: Path, metrics: dict) -> None:
         return
 
     pred = pd.read_parquet(pred_path)
-    pred_test = pred[pred["split"] == "test"].copy()
+    pred_test = pred[pred["split"] == "test"].copy() if "split" in pred.columns else pred.copy()
     if pred_test.empty:
-        st.info("No test split contracts in prediction artifact.")
+        st.info("No prediction records available.")
         return
 
     pred_test["error"] = pd.to_numeric(pred_test["pred_price_norm"], errors="coerce") - pd.to_numeric(

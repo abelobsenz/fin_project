@@ -319,7 +319,14 @@ def train(dataset_path: Path, cfg: TrainingConfig) -> Path:
     with torch.no_grad():
         z_all, _ = model.encode(surface_scaled)
 
-    dyn_train_idx = tr_dates[1:]
+    # IMPORTANT: dynamics is used at inference as (z_t, ctx_t) -> z_{t+1}.
+    # Using ctx_{t+1} during training leaks information about the target day
+    # because ctx contains surface-derived features at that same date.
+    #
+    # Therefore we train on aligned pairs (t -> t+1):
+    #   inputs:  z_t, ctx_t
+    #   targets: z_{t+1}
+    dyn_train_idx = tr_dates[:-1]
 
     for epoch in range(1, cfg.head_epochs + 1):
         model.train()
@@ -328,12 +335,12 @@ def train(dataset_path: Path, cfg: TrainingConfig) -> Path:
         exec_losses = []
 
         for batch in _iter_batches(dyn_train_idx, cfg.dyn_batch_size, rng):
-            z_prev = z_all[batch - 1]
+            z_now = z_all[batch]
             ctx = context_scaled[batch]
-            z_t = z_all[batch]
+            z_next = z_all[batch + 1]
 
-            pred = model.forward_dynamics(z_prev, ctx)
-            dyn_loss = F.mse_loss(pred, z_t)
+            pred = model.forward_dynamics(z_now, ctx)
+            dyn_loss = F.mse_loss(pred, z_next)
 
             opt_head.zero_grad(set_to_none=True)
             dyn_loss.backward()
@@ -373,9 +380,9 @@ def train(dataset_path: Path, cfg: TrainingConfig) -> Path:
         with torch.no_grad():
             val_dyn = np.nan
             if len(va_dates) > 1:
-                idx = va_dates[1:]
-                pred = model.forward_dynamics(z_all[idx - 1], context_scaled[idx])
-                val_dyn = float(F.mse_loss(pred, z_all[idx]).item())
+                idx = va_dates[:-1]
+                pred = model.forward_dynamics(z_all[idx], context_scaled[idx])
+                val_dyn = float(F.mse_loss(pred, z_all[idx + 1]).item())
 
             val_price = np.nan
             val_exec = np.nan
@@ -428,7 +435,7 @@ def train(dataset_path: Path, cfg: TrainingConfig) -> Path:
 
         dyn_loss = torch.tensor(0.0, device=device)
         if len(tr_dates) > 1:
-            dyn_pred = model.forward_dynamics(z[:-1], ctx[1:])
+            dyn_pred = model.forward_dynamics(z[:-1], ctx[:-1])
             dyn_loss = F.mse_loss(dyn_pred, z[1:])
 
         p_loss = torch.tensor(0.0, device=device)
@@ -513,19 +520,6 @@ def train(dataset_path: Path, cfg: TrainingConfig) -> Path:
     latent_df = pd.DataFrame(latent, columns=[f"z_{i}" for i in range(latent.shape[1])])
     latent_df.insert(0, "date", dates)
     latent_df.to_parquet(run_dir / "latent_states.parquet", index=False)
-
-    split_info = {
-        "train_date_idx": tr_dates.tolist(),
-        "val_date_idx": va_dates.tolist(),
-        "test_date_idx": te_dates.tolist(),
-        "train_dates": [dates[i] for i in tr_dates],
-        "val_dates": [dates[i] for i in va_dates],
-        "test_dates": [dates[i] for i in te_dates],
-        "n_contracts_train": int(len(c_tr)),
-        "n_contracts_val": int(len(c_va)),
-        "n_contracts_test": int(len(c_te)),
-    }
-    (run_dir / "split_info.json").write_text(json.dumps(split_info, indent=2), encoding="utf-8")
 
     cfg_payload = asdict(cfg)
     cfg_payload["out_dir"] = str(cfg.out_dir)
