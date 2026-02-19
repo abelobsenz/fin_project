@@ -1,0 +1,73 @@
+{
+  "generated_at_utc": "2026-02-18T18:53:05.160013Z",
+  "run_dir": "/Users/abelobsenz/fin_project copy/outputs/AAPL/runs/runs_2024train_full/run_20260218_185258",
+  "dataset_path": "/Users/abelobsenz/fin_project copy/outputs/AAPL/datasets/dataset_train_2024_full/dataset.npz",
+  "objective": {
+    "type": "mean_minus_risk_std",
+    "risk_aversion": 0.5,
+    "target_ratio": 1.0,
+    "target_ratio_penalty": 0.05
+  },
+  "execution": {
+    "underlying_slippage_bps": 1.0,
+    "min_abs_shares": 20.0,
+    "max_shares": 100.0
+  },
+  "feature_spec": {
+    "use_latent": true,
+    "use_context": true,
+    "use_net_delta": true,
+    "use_spot": true
+  },
+  "baselines": {
+    "ratio_0.0": {
+      "train": {
+        "mean_pnl": 0.4329969584941864,
+        "std_pnl": 257.1753234863281,
+        "objective": -128.1546630859375
+      },
+      "val": {
+        "mean_pnl": 33.78237533569336,
+        "std_pnl": 226.54180908203125,
+        "objective": -79.488525390625
+      }
+    },
+    "ratio_0.85": {
+      "train": {
+        "mean_pnl": 35.751808166503906,
+        "std_pnl": 169.3721923828125,
+        "objective": -48.934288024902344
+      },
+      "val": {
+        "mean_pnl": 49.909053802490234,
+        "std_pnl": 171.71876525878906,
+        "objective": -35.9503288269043
+      }
+    },
+    "ratio_1.0": {
+      "train": {
+        "mean_pnl": 42.36624526977539,
+        "std_pnl": 164.66172790527344,
+        "objective": -39.96461868286133
+      },
+      "val": {
+        "mean_pnl": 52.09099578857422,
+        "std_pnl": 169.08958435058594,
+        "objective": -32.45379638671875
+      }
+    }
+  },
+  "learned": {
+    "train": {
+      "mean_pnl": 59.7589111328125,
+      "std_pnl": 146.6742706298828,
+      "objective": -13.578224182128906
+    },
+    "val": {
+      "mean_pnl": 58.281803131103516,
+      "std_pnl": 168.6790771484375,
+      "objective": -26.057735443115234
+    }
+  },
+  "policy_path": "/Users/abelobsenz/fin_project copy/outputs/AAPL/runs/runs_2024train_full/run_20260218_185258/hedge_policy/20260218_185303/hedge_policy.pt"
+}

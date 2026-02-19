@@ -201,10 +201,46 @@ def _backtest_command(ns: Any) -> None:
             vertical_wing_rich_signal_penalty=getattr(ns, "vertical_wing_rich_signal_penalty", 0.75),
             vertical_skip_if_no_wing=bool(getattr(ns, "vertical_skip_if_no_wing", True)),
             hedge_underlying_delta=bool(getattr(ns, "hedge_underlying_delta", False)),
-            hedge_underlying_ratio=getattr(ns, "hedge_underlying_ratio", 0.5),
+            hedge_underlying_ratio=getattr(ns, "hedge_underlying_ratio", 1.0),
             hedge_underlying_min_abs_shares=getattr(ns, "hedge_underlying_min_abs_shares", 25.0),
             hedge_underlying_max_shares=getattr(ns, "hedge_underlying_max_shares", 5000),
             hedge_underlying_slippage_bps=getattr(ns, "hedge_underlying_slippage_bps", 1.0),
+            hedge_policy=getattr(ns, "hedge_policy", "fixed"),
+            hedge_policy_path=getattr(ns, "hedge_policy_path", None),
+        )
+    )
+    print(out_dir)
+
+
+def _train_hedge_policy_command(ns: Any) -> None:
+    """Train a state-dependent underlying hedge ratio policy.
+
+    This uses an existing backtest run under <run_dir>/backtest to build daily
+    hedge episodes (options PnL and net option delta) and then learns an MLP
+    mapping model state -> hedge ratio.
+    """
+    from ivdyn.hedge_policy import HedgePolicyTrainConfig, train_hedge_policy
+
+    run_dir = _resolve_run_dir(ns.run_dir)
+    dataset = _resolve_dataset(ns.dataset, run_dir)
+    out_dir = train_hedge_policy(
+        HedgePolicyTrainConfig(
+            run_dir=run_dir,
+            dataset_path=dataset,
+            out_dir=_to_path(ns.out_dir).resolve() if ns.out_dir else None,
+            device=ns.device,
+            hidden_dim=ns.hidden_dim,
+            depth=ns.depth,
+            max_ratio=ns.max_ratio,
+            epochs=ns.epochs,
+            lr=ns.lr,
+            weight_decay=ns.weight_decay,
+            train_frac=ns.train_frac,
+            seed=ns.seed,
+            risk_aversion=ns.risk_aversion,
+            underlying_slippage_bps=ns.underlying_slippage_bps,
+            min_abs_shares=ns.min_abs_shares,
+            max_shares=ns.max_shares,
         )
     )
     print(out_dir)
@@ -925,7 +961,7 @@ def _build_parser() -> ArgumentParser:
         help="Disable LONG put candidates in the selector.",
     )
     p.set_defaults(allow_long_puts=True)
-    p.add_argument("--max-trades-per-day", type=int, default=5)
+    p.add_argument("--max-trades-per-day", type=int, default=2)
     p.add_argument(
         "--signal-abs-gate",
         type=float,
@@ -981,11 +1017,46 @@ def _build_parser() -> ArgumentParser:
         help="Disable daily underlying delta hedge.",
     )
     p.set_defaults(hedge_underlying_delta=True)
-    p.add_argument("--hedge-underlying-ratio", type=float, default=1.0, help="0=off. 1.0=full delta neutralization; 0.5=half hedge.")
-    p.add_argument("--hedge-underlying-min-abs-shares", type=float, default=20.0, help="Do not place a hedge trade unless |shares| exceeds this threshold.")
-    p.add_argument("--hedge-underlying-max-shares", type=int, default=200)
+    p.add_argument("--hedge-underlying-ratio", type=float, default=0.1, help="0=off. 1.0=full delta neutralization; 0.5=half hedge.")
+    p.add_argument("--hedge-underlying-min-abs-shares", type=float, default=15.0, help="Do not place a hedge trade unless |shares| exceeds this threshold.")
+    p.add_argument("--hedge-underlying-max-shares", type=int, deivfault=50)
     p.add_argument("--hedge-underlying-slippage-bps", type=float, default=1.0)
+    p.add_argument(
+        "--hedge-policy",
+        choices=["fixed", "learned"],
+        default="fixed",
+        help="Underlying hedge policy. 'fixed' uses --hedge-underlying-ratio. 'learned' loads --hedge-policy-path.",
+    )
+    p.add_argument(
+        "--hedge-policy-path",
+        default=None,
+        help="Path to a trained hedge_policy.pt (required when --hedge-policy learned).",
+    )
     p.set_defaults(func=_backtest_command)
+
+    p = sub.add_parser("train-hedge-policy")
+    p.add_argument("--run-dir", default=None, help="Run directory containing model.pt and backtest artifacts.")
+    p.add_argument("--dataset", default=None, help="Dataset used for the backtest (defaults to train_summary.json).")
+    p.add_argument("--out-dir", default=None, help="Output directory for the trained policy (default: <run_dir>/hedge_policy/<timestamp>).")
+    p.add_argument("--device", default=None)
+    p.add_argument("--hidden-dim", type=int, default=64)
+    p.add_argument("--depth", type=int, default=2)
+    p.add_argument("--max-ratio", type=float, default=1.25)
+    p.add_argument("--epochs", type=int, default=400)
+    p.add_argument("--lr", type=float, default=3e-3)
+    p.add_argument("--weight-decay", type=float, default=1e-4)
+    p.add_argument("--train-frac", type=float, default=0.7, help="Fraction of days (by time) used for training; remaining are validation.")
+    p.add_argument("--seed", type=int, default=7)
+    p.add_argument(
+        "--risk-aversion",
+        type=float,
+        default=0.50,
+        help="Objective is mean(daily_pnl) - risk_aversion*std(daily_pnl). Higher => more hedging / less variance.",
+    )
+    p.add_argument("--underlying-slippage-bps", type=float, default=1.0)
+    p.add_argument("--min-abs-shares", type=float, default=20.0)
+    p.add_argument("--max-shares", type=float, default=200.0)
+    p.set_defaults(func=_train_hedge_policy_command)
 
     p = sub.add_parser("ui")
     p.add_argument("--run-dir", default=None)

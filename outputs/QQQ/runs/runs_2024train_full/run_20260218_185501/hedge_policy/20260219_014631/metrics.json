@@ -1,0 +1,79 @@
+{
+  "generated_at_utc": "2026-02-19T01:46:33.652302Z",
+  "run_dir": "/Users/abelobsenz/fin_project copy/outputs/QQQ/runs/runs_2024train_full/run_20260218_185501",
+  "dataset_path": "/Users/abelobsenz/fin_project copy/outputs/QQQ/datasets/dataset_test_2025_full/dataset.npz",
+  "objective": {
+    "type": "mean_minus_risk_std",
+    "risk_aversion": 0.5,
+    "target_ratio": 1.0,
+    "target_ratio_penalty": 0.05,
+    "turnover_penalty": 0.02
+  },
+  "execution": {
+    "underlying_slippage_bps": 1.0,
+    "min_abs_shares": 20.0,
+    "soft_cap_shares": 35.0,
+    "index_max_shares": 60.0,
+    "single_name_max_shares": 40.0,
+    "max_shares": 100.0,
+    "effective_hard_cap_shares": 60.0,
+    "underlying_symbol": "QQQ"
+  },
+  "feature_spec": {
+    "use_latent": true,
+    "use_context": true,
+    "use_net_delta": true,
+    "use_spot": true
+  },
+  "baselines": {
+    "ratio_0.0": {
+      "train": {
+        "mean_pnl": -26.217161178588867,
+        "std_pnl": 216.04095458984375,
+        "objective": -134.23765563964844
+      },
+      "val": {
+        "mean_pnl": -24.304479598999023,
+        "std_pnl": 152.29010009765625,
+        "objective": -100.44955444335938
+      }
+    },
+    "ratio_0.85": {
+      "train": {
+        "mean_pnl": -20.971172332763672,
+        "std_pnl": 97.50385284423828,
+        "objective": -69.97909545898438
+      },
+      "val": {
+        "mean_pnl": -14.028375625610352,
+        "std_pnl": 74.416259765625,
+        "objective": -51.5044059753418
+      }
+    },
+    "ratio_1.0": {
+      "train": {
+        "mean_pnl": -20.30106544494629,
+        "std_pnl": 80.16506958007812,
+        "objective": -60.705204010009766
+      },
+      "val": {
+        "mean_pnl": -10.599849700927734,
+        "std_pnl": 70.28338623046875,
+        "objective": -46.08016586303711
+      }
+    }
+  },
+  "learned": {
+    "train": {
+      "mean_pnl": 13.9595947265625,
+      "std_pnl": 90.0414810180664,
+      "objective": -31.337207794189453
+    },
+    "val": {
+      "mean_pnl": -15.523073196411133,
+      "std_pnl": 87.58113098144531,
+      "objective": -59.59272003173828
+    }
+  },
+  "policy_path": "/Users/abelobsenz/fin_project copy/outputs/QQQ/runs/runs_2024train_full/run_20260218_185501/hedge_policy/20260219_014631/hedge_policy.pt"
+}

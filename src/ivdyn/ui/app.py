@@ -251,13 +251,24 @@ def _artifact_signature(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
     return tuple(sig)
 
 
+def _prefixed_scalar_map(data: dict | None, prefix: str) -> dict[str, object]:
+    out: dict[str, object] = {}
+    if not data:
+        return out
+    for k, v in data.items():
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            out[f"{prefix}{k}"] = v
+    return out
+
+
 def _symbol_report_row(symbol: str, run_dir: Path) -> dict[str, object]:
     eval_dir = run_dir / "evaluation"
     bt_dir = run_dir / "backtest"
     train_summary = _read_json(run_dir / "train_summary.json")
+    train_config = _read_json(run_dir / "train_config.json")
     metrics = _read_json(eval_dir / "metrics.json")
     bt_summary = _read_json(bt_dir / "summary.json")
-    return {
+    row: dict[str, object] = {
         "symbol": symbol,
         "run_name": run_dir.name,
         "run_dir": str(run_dir.resolve()),
@@ -272,6 +283,7 @@ def _symbol_report_row(symbol: str, run_dir: Path) -> dict[str, object]:
         "total_options_pnl_gross": bt_summary.get("total_options_pnl_gross"),
         "total_options_pnl": bt_summary.get("total_options_pnl"),
         "total_hedge_pnl": bt_summary.get("total_hedge_pnl"),
+        "risk_free_rate_annual": bt_summary.get("risk_free_rate_annual"),
         "fill_gate": bt_summary.get("fill_gate"),
         "slippage_bps": bt_summary.get("slippage_bps"),
         "spread_cross_fraction": bt_summary.get("spread_cross_fraction"),
@@ -281,6 +293,11 @@ def _symbol_report_row(symbol: str, run_dir: Path) -> dict[str, object]:
         "price_rmse": metrics.get("price_rmse"),
         "surface_iv_rmse": metrics.get("surface_iv_rmse"),
     }
+    row.update(_prefixed_scalar_map(train_summary, "train_"))
+    row.update(_prefixed_scalar_map(train_config, "train_cfg_"))
+    row.update(_prefixed_scalar_map(metrics, "eval_"))
+    row.update(_prefixed_scalar_map(bt_summary, "bt_"))
+    return row
 
 
 def _collect_multi_symbol_summary(symbol_runs: dict[str, Path]) -> pd.DataFrame:
@@ -297,6 +314,7 @@ def _all_symbols_report_paths(symbol_runs: dict[str, Path]) -> list[Path]:
     for run_dir in symbol_runs.values():
         for rel in (
             "train_summary.json",
+            "train_config.json",
             "evaluation/metrics.json",
             "backtest/summary.json",
             "backtest/daily.parquet",
@@ -326,6 +344,8 @@ def _compute_backtest_stats(daily: pd.DataFrame, trades: pd.DataFrame, bt_summar
 
     stats["total_pnl"] = total_pnl
     stats["daily_sharpe"] = float(bt_summary.get("daily_sharpe", np.nan))
+    stats["daily_sharpe_rf0"] = float(bt_summary.get("daily_sharpe_rf0", np.nan))
+    stats["risk_free_rate_annual"] = float(bt_summary.get("risk_free_rate_annual", np.nan))
     stats["max_drawdown"] = float(bt_summary.get("max_drawdown", drawdown.min() if len(drawdown) else np.nan))
     stats["win_rate"] = float(bt_summary.get("win_rate", (pnl > 0).mean()))
     stats["avg_daily_pnl"] = float(bt_summary.get("avg_daily_pnl", pnl.mean()))
@@ -349,6 +369,133 @@ def _compute_backtest_stats(daily: pd.DataFrame, trades: pd.DataFrame, bt_summar
             stats["trade_win_rate"] = float((t_pnl > 0).mean())
 
     return stats
+
+
+def _build_trade_spot_volume_frame(legs: pd.DataFrame) -> pd.DataFrame:
+    out_cols = [
+        "date",
+        "date_label",
+        "date_rank",
+        "trade_key",
+        "instrument",
+        "side",
+        "leg_role",
+        "symbol",
+        "spot_exec",
+        "volume",
+        "volume_signed",
+        "volume_unit",
+        "fills",
+    ]
+    if legs.empty or "date" not in legs.columns:
+        return pd.DataFrame(columns=out_cols)
+
+    frame = legs.copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame = frame.dropna(subset=["date"]).copy()
+    if frame.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    def _num_col(col: str) -> pd.Series:
+        if col in frame.columns:
+            return pd.to_numeric(frame[col], errors="coerce")
+        return pd.Series(np.nan, index=frame.index, dtype=float)
+
+    if "instrument" in frame.columns:
+        frame["instrument"] = frame["instrument"].astype(str).str.upper()
+    else:
+        frame["instrument"] = np.where(_num_col("shares").notna(), "UNDERLYING", "OPTION")
+
+    if "side" in frame.columns:
+        frame["side"] = frame["side"].astype(str).str.upper()
+    else:
+        frame["side"] = "UNKNOWN"
+
+    if "symbol" in frame.columns:
+        frame["symbol"] = frame["symbol"].astype(str)
+    else:
+        frame["symbol"] = ""
+
+    if "leg_role" in frame.columns:
+        frame["leg_role"] = frame["leg_role"].astype(str)
+    else:
+        frame["leg_role"] = ""
+
+    if "trade_key" in frame.columns:
+        frame["trade_key"] = frame["trade_key"].astype(str)
+    else:
+        frame["trade_key"] = ""
+
+    spot_opt = _num_col("spot")
+    spot_under = _num_col("spot_now")
+    frame["spot_exec"] = spot_opt.where(spot_opt.notna(), spot_under)
+
+    contracts = _num_col("contracts").abs()
+    shares = _num_col("shares").abs()
+    volume = pd.Series(
+        np.where(frame["instrument"].eq("UNDERLYING"), shares.to_numpy(), contracts.to_numpy()),
+        index=frame.index,
+        dtype=float,
+    )
+    frame["volume"] = volume.where(np.isfinite(volume), shares)
+    frame["volume_unit"] = np.where(frame["instrument"].eq("UNDERLYING"), "shares", "contracts")
+
+    side_sign = np.where(frame["side"].eq("LONG"), 1.0, np.where(frame["side"].eq("SHORT"), -1.0, 0.0))
+    frame["volume_signed"] = frame["volume"] * side_sign
+
+    frame = frame[
+        np.isfinite(frame["spot_exec"])
+        & np.isfinite(frame["volume"])
+        & (frame["spot_exec"] > 0.0)
+        & (frame["volume"] > 0.0)
+    ].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    frame["date"] = frame["date"].dt.normalize()
+    frame["date_rank"] = pd.factorize(frame["date"], sort=True)[0] + 1
+    frame["date_label"] = frame["date"].dt.strftime("%Y-%m-%d")
+    frame["fills"] = 1
+    return frame[out_cols].sort_values(["date", "instrument", "spot_exec"]).reset_index(drop=True)
+
+
+def _aggregate_trade_spot_volume_by_day(trade_flow: pd.DataFrame) -> pd.DataFrame:
+    out_cols = [
+        "date",
+        "date_label",
+        "date_rank",
+        "trade_key",
+        "instrument",
+        "side",
+        "leg_role",
+        "symbol",
+        "spot_exec",
+        "volume",
+        "volume_signed",
+        "volume_unit",
+        "fills",
+    ]
+    if trade_flow.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    grouped = trade_flow.copy()
+    grouped["spot_x_volume"] = grouped["spot_exec"] * grouped["volume"]
+    grouped = grouped.groupby(
+        ["date", "date_label", "date_rank", "instrument", "side", "volume_unit"], as_index=False
+    ).agg(
+        volume=("volume", "sum"),
+        volume_signed=("volume_signed", "sum"),
+        spot_x_volume=("spot_x_volume", "sum"),
+        fills=("fills", "sum"),
+    )
+    grouped["spot_exec"] = grouped["spot_x_volume"] / grouped["volume"].replace(0.0, np.nan)
+    grouped["trade_key"] = ""
+    grouped["leg_role"] = "DAILY_AGG"
+    grouped["symbol"] = ""
+    grouped = grouped[np.isfinite(grouped["spot_exec"]) & np.isfinite(grouped["volume"]) & (grouped["volume"] > 0.0)]
+    if grouped.empty:
+        return pd.DataFrame(columns=out_cols)
+    return grouped[out_cols].sort_values(["date", "instrument", "spot_exec"]).reset_index(drop=True)
 
 
 def _compute_prediction_stats(pred_test: pd.DataFrame) -> dict[str, float]:
@@ -1133,6 +1280,7 @@ def _build_all_symbols_pdf_report_bytes(symbol_runs: dict[str, Path]) -> bytes:
         "total_options_pnl_gross",
         "total_options_pnl",
         "total_hedge_pnl",
+        "risk_free_rate_annual",
         "fill_gate",
         "slippage_bps",
         "spread_cross_fraction",
@@ -1168,6 +1316,8 @@ def _build_all_symbols_pdf_report_bytes(symbol_runs: dict[str, Path]) -> bytes:
         "option_fee_per_contract",
         "min_edge_to_cost_ratio",
     ]
+    overview_cols = [c for c in overview_cols if c in summary.columns]
+    cost_cols = [c for c in cost_cols if c in summary.columns]
 
     buf = BytesIO()
     with PdfPages(buf) as pdf:
@@ -1218,28 +1368,32 @@ def _build_all_symbols_pdf_report_bytes(symbol_runs: dict[str, Path]) -> bytes:
         ax0 = fig.add_subplot(gs[0, 0])
         ax1 = fig.add_subplot(gs[1, 0])
         _render_pdf_table(ax0, "Cost & Execution Parameters", summary[cost_cols], max_rows=20)
-        fee_view = summary[
-            [
-                "symbol",
-                "total_fees",
-                "total_options_pnl_gross",
-                "total_options_pnl",
-                "total_hedge_pnl",
-            ]
-        ].copy()
-        fee_view["fee_drag_pct_of_options_gross"] = np.where(
-            fee_view["total_options_pnl_gross"].abs() > 1e-12,
-            100.0 * fee_view["total_fees"] / fee_view["total_options_pnl_gross"].abs(),
-            np.nan,
-        )
+        fee_cols = [
+            c
+            for c in ["symbol", "total_fees", "total_options_pnl_gross", "total_options_pnl", "total_hedge_pnl"]
+            if c in summary.columns
+        ]
+        fee_view = summary[fee_cols].copy()
+        if {"total_fees", "total_options_pnl_gross"}.issubset(set(fee_view.columns)):
+            fee_view["fee_drag_pct_of_options_gross"] = np.where(
+                fee_view["total_options_pnl_gross"].abs() > 1e-12,
+                100.0 * fee_view["total_fees"] / fee_view["total_options_pnl_gross"].abs(),
+                np.nan,
+            )
         _render_pdf_table(ax1, "Cost Outcomes", fee_view, max_rows=20)
         fig.suptitle("Cost and Execution Diagnostics", fontsize=14)
         fig.tight_layout()
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
-        # Symbol detail pages
+        # Symbol detail pages (full scalar payloads)
         for _, row in summary.iterrows():
+            run_dir = Path(str(row.get("run_dir", "")))
+            train_summary = _read_json(run_dir / "train_summary.json")
+            train_config = _read_json(run_dir / "train_config.json")
+            eval_metrics = _read_json(run_dir / "evaluation" / "metrics.json")
+            bt_summary = _read_json(run_dir / "backtest" / "summary.json")
+
             fig = plt.figure(figsize=(11, 8.5))
             gs = fig.add_gridspec(3, 1, height_ratios=[0.55, 1.0, 1.0])
             ax_h = fig.add_subplot(gs[0, 0])
@@ -1285,6 +1439,39 @@ def _build_all_symbols_pdf_report_bytes(symbol_runs: dict[str, Path]) -> bytes:
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
+            full_rows: list[dict[str, object]] = []
+            for section, payload in (
+                ("train_summary", train_summary),
+                ("train_config", train_config),
+                ("eval_metrics", eval_metrics),
+                ("backtest_summary", bt_summary),
+            ):
+                for k, v in _scalar_items(payload):
+                    full_rows.append({"section": section, "metric": k, "value": v})
+            full_df = pd.DataFrame(full_rows)
+            if full_df.empty:
+                continue
+            rows_per_page = 48
+            pages = int(np.ceil(len(full_df) / rows_per_page))
+            for page in range(pages):
+                lo = page * rows_per_page
+                hi = min(len(full_df), lo + rows_per_page)
+                fig = plt.figure(figsize=(11, 8.5))
+                ax = fig.add_subplot(111)
+                _render_pdf_table(
+                    ax,
+                    f"All Scalar Fields ({lo + 1}-{hi} of {len(full_df)})",
+                    full_df.iloc[lo:hi].reset_index(drop=True),
+                    max_rows=rows_per_page,
+                )
+                fig.suptitle(
+                    f"Symbol Detail Scalars: {row.get('symbol', 'n/a')} (Page {page + 1}/{pages})",
+                    fontsize=13,
+                )
+                fig.tight_layout()
+                pdf.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
+
     buf.seek(0)
     return buf.getvalue()
 
@@ -1303,6 +1490,7 @@ def _render_backtest_tab(bt_dir: Path) -> None:
 
     daily_path = bt_dir / "daily.parquet"
     trades_path = bt_dir / "trades.parquet"
+    legs_path = bt_dir / "legs.parquet"
     summary_path = bt_dir / "summary.json"
 
     if not daily_path.exists():
@@ -1311,7 +1499,9 @@ def _render_backtest_tab(bt_dir: Path) -> None:
 
     daily = _read_parquet_or_csv(daily_path)
     trades = _read_parquet_or_csv(trades_path)
+    legs = _read_parquet_or_csv(legs_path)
     bt_summary = _read_json(summary_path)
+    trade_flow = _build_trade_spot_volume_frame(legs)
 
     daily["date"] = pd.to_datetime(daily["date"])
     daily["pnl"] = pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0)
@@ -1351,7 +1541,7 @@ def _render_backtest_tab(bt_dir: Path) -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total PnL", f"{_format_num(stats.get('total_pnl'), 2)}")
-    c2.metric("Sharpe", _format_num(stats.get("daily_sharpe"), 3))
+    c2.metric("Sharpe (Excess)", _format_num(stats.get("daily_sharpe"), 3))
     c3.metric("Max Drawdown", _format_num(stats.get("max_drawdown"), 3))
     c4.metric("Profit Factor", _format_num(stats.get("profit_factor"), 3))
 
@@ -1361,64 +1551,71 @@ def _render_backtest_tab(bt_dir: Path) -> None:
     c7.metric("Best Day", _format_num(stats.get("best_day"), 2))
     c8.metric("Worst Day", _format_num(stats.get("worst_day"), 2))
 
-    st.markdown("#### Costs & Execution")
+    c9, c10, c11, c12 = st.columns(4)
+    c9.metric("Win Rate", _format_num(stats.get("win_rate"), 3))
+    c10.metric("Avg Daily PnL", _format_num(stats.get("avg_daily_pnl"), 2))
+    c11.metric("Trade Win Rate", _format_num(stats.get("trade_win_rate"), 3))
+    c12.metric("Sharpe (rf=0)", _format_num(stats.get("daily_sharpe_rf0"), 3))
+
     total_fees = float(bt_summary.get("total_fees", daily["fees"].sum()))
     options_gross = float(bt_summary.get("total_options_pnl_gross", daily["options_pnl_gross"].sum()))
     options_net = float(bt_summary.get("total_options_pnl", daily["options_pnl"].sum()))
     fee_drag_pct = (100.0 * total_fees / abs(options_gross)) if abs(options_gross) > 1e-12 else np.nan
 
-    ec1, ec2, ec3, ec4 = st.columns(4)
-    ec1.metric("Total Fees", _format_num(total_fees, 2))
-    ec2.metric("Options PnL (Gross)", _format_num(options_gross, 2))
-    ec3.metric("Options PnL (Net)", _format_num(options_net, 2))
-    ec4.metric("Fee Drag vs Gross", f"{_format_num(fee_drag_pct, 2)}%")
+    with st.expander("Costs & Execution Details", expanded=False):
+        ec1, ec2, ec3, ec4 = st.columns(4)
+        ec1.metric("Total Fees", _format_num(total_fees, 2))
+        ec2.metric("Options PnL (Gross)", _format_num(options_gross, 2))
+        ec3.metric("Options PnL (Net)", _format_num(options_net, 2))
+        ec4.metric("Fee Drag vs Gross", f"{_format_num(fee_drag_pct, 2)}%")
 
-    ec5, ec6, ec7, ec8 = st.columns(4)
-    ec5.metric("Option Comm/Contract", _format_num(bt_summary.get("option_commission_per_contract"), 4))
-    ec6.metric("Option Fee/Contract", _format_num(bt_summary.get("option_fee_per_contract"), 4))
-    ec7.metric("Slippage (bps)", _format_num(bt_summary.get("slippage_bps"), 2))
-    ec8.metric("Spread Cross Fraction", _format_num(bt_summary.get("spread_cross_fraction"), 3))
+        ec5, ec6, ec7, ec8 = st.columns(4)
+        ec5.metric("Option Comm/Contract", _format_num(bt_summary.get("option_commission_per_contract"), 4))
+        ec6.metric("Option Fee/Contract", _format_num(bt_summary.get("option_fee_per_contract"), 4))
+        ec7.metric("Slippage (bps)", _format_num(bt_summary.get("slippage_bps"), 2))
+        ec8.metric("Spread Cross Fraction", _format_num(bt_summary.get("spread_cross_fraction"), 3))
 
-    execution_rows = [
-        ("strategy_mode", bt_summary.get("strategy_mode")),
-        ("fill_model", bt_summary.get("fill_model")),
-        ("fill_gate", bt_summary.get("fill_gate")),
-        ("min_edge_to_cost_ratio", bt_summary.get("min_edge_to_cost_ratio")),
-        ("max_trades_per_day", bt_summary.get("max_trades_per_day")),
-        ("signal_abs_gate", bt_summary.get("signal_abs_gate")),
-    ]
-    exec_df = pd.DataFrame(execution_rows, columns=["metric", "value"])
-    st.dataframe(exec_df, use_container_width=True, hide_index=True)
+        execution_rows = [
+            ("strategy_mode", bt_summary.get("strategy_mode")),
+            ("fill_model", bt_summary.get("fill_model")),
+            ("fill_gate", bt_summary.get("fill_gate")),
+            ("min_edge_to_cost_ratio", bt_summary.get("min_edge_to_cost_ratio")),
+            ("max_trades_per_day", bt_summary.get("max_trades_per_day")),
+            ("signal_abs_gate", bt_summary.get("signal_abs_gate")),
+            ("risk_free_rate_annual", bt_summary.get("risk_free_rate_annual")),
+        ]
+        exec_df = pd.DataFrame(execution_rows, columns=["metric", "value"])
+        st.dataframe(exec_df, use_container_width=True, hide_index=True)
 
-    fee_chart = (
-        alt.Chart(daily)
-        .mark_bar(color="#6b8f2a", opacity=0.65)
-        .encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y("fees:Q", title="Daily Fees"),
-            tooltip=[
-                "date:T",
-                alt.Tooltip("fees:Q", title="Fees"),
-                alt.Tooltip("options_pnl_gross:Q", title="Options PnL gross"),
-                alt.Tooltip("options_pnl:Q", title="Options PnL net"),
-            ],
+        fee_chart = (
+            alt.Chart(daily)
+            .mark_bar(color="#6b8f2a", opacity=0.65)
+            .encode(
+                x=alt.X("date:T", title="Date"),
+                y=alt.Y("fees:Q", title="Daily Fees"),
+                tooltip=[
+                    "date:T",
+                    alt.Tooltip("fees:Q", title="Fees"),
+                    alt.Tooltip("options_pnl_gross:Q", title="Options PnL gross"),
+                    alt.Tooltip("options_pnl:Q", title="Options PnL net"),
+                ],
+            )
         )
-    )
-    net_options_line = (
-        alt.Chart(daily)
-        .mark_line(color="#111827", point=True)
-        .encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y("options_pnl:Q", title="Options PnL (Net)"),
-            tooltip=["date:T", alt.Tooltip("options_pnl:Q", title="Options PnL net")],
+        net_options_line = (
+            alt.Chart(daily)
+            .mark_line(color="#111827", point=True)
+            .encode(
+                x=alt.X("date:T", title="Date"),
+                y=alt.Y("options_pnl:Q", title="Options PnL (Net)"),
+                tooltip=["date:T", alt.Tooltip("options_pnl:Q", title="Options PnL net")],
+            )
         )
-    )
-    st.altair_chart(
-        alt.layer(fee_chart, net_options_line)
-        .resolve_scale(y="independent")
-        .properties(height=230, title="Daily Fees vs Net Options PnL"),
-        use_container_width=True,
-    )
+        st.altair_chart(
+            alt.layer(fee_chart, net_options_line)
+            .resolve_scale(y="independent")
+            .properties(height=230, title="Daily Fees vs Net Options PnL"),
+            use_container_width=True,
+        )
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -1471,85 +1668,216 @@ def _render_backtest_tab(bt_dir: Path) -> None:
         )
         st.altair_chart(pnl_hist, use_container_width=True)
 
-    daily_desc = daily["pnl"].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).to_frame("daily_pnl")
-    st.dataframe(daily_desc, use_container_width=True)
+    with st.expander("Hedge Diagnostics", expanded=False):
+        h1, h2, h3 = st.columns(3)
+        h1.metric("Hedge PnL", _format_num(float(daily["hedge_pnl"].sum()), 2))
+        h2.metric("Avg Risk Reduction", f"{_format_num(float(daily['hedge_risk_reduction_pct'].mean()), 2)}%")
+        h3.metric("Avg |Hedge Shares|", _format_num(float(daily["hedge_shares"].abs().mean()), 1))
 
-    st.markdown("#### Hedge Diagnostics")
-    h1, h2, h3 = st.columns(3)
-    h1.metric("Hedge PnL", _format_num(float(daily["hedge_pnl"].sum()), 2))
-    h2.metric("Avg Risk Reduction", f"{_format_num(float(daily['hedge_risk_reduction_pct'].mean()), 2)}%")
-    h3.metric("Avg |Hedge Shares|", _format_num(float(daily["hedge_shares"].abs().mean()), 1))
-
-    hedge_amt_chart = (
-        alt.Chart(daily)
-        .mark_bar()
-        .encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y("hedge_shares:Q", title="Hedge Shares"),
-            color=alt.condition("datum.hedge_shares >= 0", alt.value("#0f766e"), alt.value("#b91c1c")),
-            tooltip=[
-                "date:T",
-                alt.Tooltip("hedge_shares:Q", title="Hedge shares"),
-                alt.Tooltip("net_option_delta_shares:Q", title="Option delta shares"),
-                alt.Tooltip("post_hedge_delta_shares:Q", title="Post-hedge delta"),
-            ],
-        )
-        .properties(height=220, title="Hedge Amount Per Day")
-    )
-    st.altair_chart(hedge_amt_chart, use_container_width=True)
-
-    hedge_pnl_bar = (
-        alt.Chart(daily)
-        .mark_bar(color="#d97706", opacity=0.6)
-        .encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y("hedge_pnl:Q", title="Hedge PnL"),
-            tooltip=[
-                "date:T",
-                alt.Tooltip("hedge_pnl:Q", title="Hedge PnL"),
-                alt.Tooltip("options_pnl:Q", title="Options PnL"),
-                alt.Tooltip("pnl:Q", title="Total PnL"),
-            ],
-        )
-    )
-    risk_reduction_line = (
-        alt.Chart(daily)
-        .mark_line(color="#111827", point=True)
-        .encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y("hedge_risk_reduction_pct:Q", title="Delta Risk Reduction (%)"),
-            tooltip=[
-                "date:T",
-                alt.Tooltip("hedge_risk_reduction_pct:Q", title="Risk reduction %"),
-                alt.Tooltip("net_option_delta_shares:Q", title="Option delta shares"),
-                alt.Tooltip("post_hedge_delta_shares:Q", title="Post-hedge delta"),
-            ],
-        )
-    )
-    st.altair_chart(
-        alt.layer(hedge_pnl_bar, risk_reduction_line)
-        .resolve_scale(y="independent")
-        .properties(height=240, title="Hedge Contribution to PnL and Risk Reduction"),
-        use_container_width=True,
-    )
-
-    if not trades.empty:
-        trades = trades.copy()
-        trades["pnl"] = pd.to_numeric(trades["pnl"], errors="coerce")
-        grouped = (
-            trades.groupby(["side", "call_put"], dropna=False)
-            .agg(
-                trades=("pnl", "count"),
-                pnl_sum=("pnl", "sum"),
-                pnl_mean=("pnl", "mean"),
-                win_rate=("pnl", lambda x: float((x > 0).mean()) if len(x) else np.nan),
-                signal_median=("signal", "median"),
-                fill_prob_mean=("fill_prob", "mean"),
+        hedge_amt_chart = (
+            alt.Chart(daily)
+            .mark_bar()
+            .encode(
+                x=alt.X("date:T", title="Date"),
+                y=alt.Y("hedge_shares:Q", title="Hedge Shares"),
+                color=alt.condition("datum.hedge_shares >= 0", alt.value("#0f766e"), alt.value("#b91c1c")),
+                tooltip=[
+                    "date:T",
+                    alt.Tooltip("hedge_shares:Q", title="Hedge shares"),
+                    alt.Tooltip("net_option_delta_shares:Q", title="Option delta shares"),
+                    alt.Tooltip("post_hedge_delta_shares:Q", title="Post-hedge delta"),
+                ],
             )
-            .reset_index()
-            .sort_values("pnl_sum", ascending=False)
+            .properties(height=220, title="Hedge Amount Per Day")
         )
-        st.dataframe(grouped, use_container_width=True, hide_index=True)
+        st.altair_chart(hedge_amt_chart, use_container_width=True)
+
+        hedge_pnl_bar = (
+            alt.Chart(daily)
+            .mark_bar(color="#d97706", opacity=0.6)
+            .encode(
+                x=alt.X("date:T", title="Date"),
+                y=alt.Y("hedge_pnl:Q", title="Hedge PnL"),
+                tooltip=[
+                    "date:T",
+                    alt.Tooltip("hedge_pnl:Q", title="Hedge PnL"),
+                    alt.Tooltip("options_pnl:Q", title="Options PnL"),
+                    alt.Tooltip("pnl:Q", title="Total PnL"),
+                ],
+            )
+        )
+        risk_reduction_line = (
+            alt.Chart(daily)
+            .mark_line(color="#111827", point=True)
+            .encode(
+                x=alt.X("date:T", title="Date"),
+                y=alt.Y("hedge_risk_reduction_pct:Q", title="Delta Risk Reduction (%)"),
+                tooltip=[
+                    "date:T",
+                    alt.Tooltip("hedge_risk_reduction_pct:Q", title="Risk reduction %"),
+                    alt.Tooltip("net_option_delta_shares:Q", title="Option delta shares"),
+                    alt.Tooltip("post_hedge_delta_shares:Q", title="Post-hedge delta"),
+                ],
+            )
+        )
+        st.altair_chart(
+            alt.layer(hedge_pnl_bar, risk_reduction_line)
+            .resolve_scale(y="independent")
+            .properties(height=240, title="Hedge Contribution to PnL and Risk Reduction"),
+            use_container_width=True,
+        )
+
+    with st.expander("Executed Trade Footprint (Spot vs Volume)", expanded=False):
+        if trade_flow.empty:
+            st.info("No leg-level execution records found with usable spot and size fields.")
+        else:
+            has_underlying = bool((trade_flow["instrument"] == "UNDERLYING").any())
+            if has_underlying:
+                st.caption("Includes option legs and underlying hedge trades.")
+            else:
+                st.caption("No underlying stock trades in this run; showing options only.")
+
+            instruments = ["OPTION"] + (["UNDERLYING"] if has_underlying else [])
+            selected_instruments = st.multiselect(
+                "Instruments",
+                options=instruments,
+                default=instruments,
+                key="bt_trade_footprint_instruments",
+            )
+            time_adjust = st.radio(
+                "Time adjustment",
+                options=["Per execution", "Daily aggregate"],
+                horizontal=True,
+                key="bt_trade_footprint_time_adjust",
+                help="Daily aggregate uses volume-weighted spot by day/instrument/side.",
+            )
+            volume_basis = st.radio(
+                "Volume basis",
+                options=["Share-equivalent (options x100)", "Native (contracts vs shares)"],
+                horizontal=True,
+                key="bt_trade_footprint_volume_basis",
+                help="Native mixes contracts and shares; share-equivalent converts 1 option contract to 100 shares.",
+            )
+            use_signed_volume = st.checkbox(
+                "Use signed volume (SHORT as negative)",
+                value=False,
+                key="bt_trade_footprint_signed",
+            )
+
+            if not selected_instruments:
+                st.warning("Select at least one instrument to render the chart.")
+            else:
+                footprint = trade_flow[trade_flow["instrument"].isin(selected_instruments)].copy()
+                if time_adjust == "Daily aggregate":
+                    footprint = _aggregate_trade_spot_volume_by_day(footprint)
+
+                if footprint.empty:
+                    st.warning("No trades match the selected footprint filters.")
+                else:
+                    footprint["volume_plot"] = pd.to_numeric(footprint["volume"], errors="coerce")
+                    footprint["volume_signed_plot"] = pd.to_numeric(footprint["volume_signed"], errors="coerce")
+                    if volume_basis.startswith("Share-equivalent"):
+                        option_scale = np.where(footprint["instrument"].eq("OPTION"), 100.0, 1.0)
+                        footprint["volume_plot"] = footprint["volume_plot"] * option_scale
+                        footprint["volume_signed_plot"] = footprint["volume_signed_plot"] * option_scale
+                        y_base_title = "Share-Equivalent Volume"
+                    else:
+                        y_base_title = "Volume"
+
+                    y_col = "volume_signed_plot" if use_signed_volume else "volume_plot"
+                    y_title = f"Signed {y_base_title}" if use_signed_volume else y_base_title
+                    brush = alt.selection_interval(encodings=["x"], name="trade_window")
+                    spot_min = float(pd.to_numeric(footprint["spot_exec"], errors="coerce").min())
+                    spot_max = float(pd.to_numeric(footprint["spot_exec"], errors="coerce").max())
+                    if np.isfinite(spot_min) and np.isfinite(spot_max):
+                        if spot_max > spot_min:
+                            x_pad = 0.05 * (spot_max - spot_min)
+                        else:
+                            x_pad = max(1.0, 0.01 * abs(spot_min))
+                        x_scale = alt.Scale(domain=[spot_min - x_pad, spot_max + x_pad], zero=False)
+                    else:
+                        x_scale = alt.Scale(zero=False)
+
+                    timeline = (
+                        alt.Chart(footprint)
+                        .mark_bar(opacity=0.72)
+                        .encode(
+                            x=alt.X("date:T", title="Date"),
+                            y=alt.Y("sum(volume_plot):Q", title=y_base_title),
+                            color=alt.Color("instrument:N", title="Instrument"),
+                            tooltip=[
+                                "date:T",
+                                "instrument:N",
+                                alt.Tooltip("sum(volume_plot):Q", title=y_base_title),
+                                alt.Tooltip("sum(fills):Q", title="Fills"),
+                            ],
+                        )
+                        .add_params(brush)
+                        .properties(height=110, title="Volume Timeline (brush to filter)")
+                    )
+
+                    scatter = (
+                        alt.Chart(footprint)
+                        .mark_circle(size=86, opacity=0.68)
+                        .encode(
+                            x=alt.X("spot_exec:Q", title="Spot", scale=x_scale),
+                            y=alt.Y(f"{y_col}:Q", title=y_title),
+                            color=alt.Color(
+                                "date_rank:Q",
+                                title="Trade Day #",
+                                scale=alt.Scale(scheme="tealblues"),
+                            ),
+                            shape=alt.Shape("instrument:N", title="Instrument"),
+                            tooltip=[
+                                "date:T",
+                                alt.Tooltip("date_rank:Q", title="Trade day #"),
+                                "instrument:N",
+                                "side:N",
+                                "leg_role:N",
+                                "symbol:N",
+                                alt.Tooltip("spot_exec:Q", title="Spot"),
+                                alt.Tooltip("volume_plot:Q", title=y_base_title),
+                                alt.Tooltip("volume_signed_plot:Q", title=f"Signed {y_base_title}"),
+                                alt.Tooltip("volume:Q", title="Volume"),
+                                alt.Tooltip("volume_signed:Q", title="Signed volume"),
+                                alt.Tooltip("fills:Q", title="Fills"),
+                                "volume_unit:N",
+                            ],
+                        )
+                        .transform_filter(brush)
+                        .properties(height=300, title="Spot vs Volume Footprint")
+                    )
+
+                    st.altair_chart(
+                        alt.vconcat(timeline, scatter).resolve_scale(color="independent"),
+                        use_container_width=True,
+                    )
+                    st.caption(
+                        "Timeline uses real trading dates (including gaps). Brush any period above to inspect how "
+                        "spot/volume footprint changes over time."
+                    )
+
+    with st.expander("Distribution & Trade Breakdown", expanded=False):
+        daily_desc = daily["pnl"].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).to_frame("daily_pnl")
+        st.dataframe(daily_desc, use_container_width=True)
+
+        if not trades.empty:
+            trades = trades.copy()
+            trades["pnl"] = pd.to_numeric(trades["pnl"], errors="coerce")
+            grouped = (
+                trades.groupby(["side", "call_put"], dropna=False)
+                .agg(
+                    trades=("pnl", "count"),
+                    pnl_sum=("pnl", "sum"),
+                    pnl_mean=("pnl", "mean"),
+                    win_rate=("pnl", lambda x: float((x > 0).mean()) if len(x) else np.nan),
+                    signal_median=("signal", "median"),
+                    fill_prob_mean=("fill_prob", "mean"),
+                )
+                .reset_index()
+                .sort_values("pnl_sum", ascending=False)
+            )
+            st.dataframe(grouped, use_container_width=True, hide_index=True)
 
 
 def _render_surface_tab(eval_dir: Path) -> None:
@@ -1860,17 +2188,13 @@ def render_dashboard(run_dir: Path) -> None:
         unsafe_allow_html=True,
     )
 
-    top1, top2, top3, top4 = st.columns(4)
+    top1, top2, top3, top4, top5, top6 = st.columns(6)
     top1.metric("Price RMSE", _format_num(metrics.get("price_rmse")))
     top2.metric("Surface RMSE", _format_num(metrics.get("surface_iv_rmse")))
     top3.metric("Backtest PnL", _format_num(bt_summary.get("total_pnl"), 2))
     top4.metric("Backtest Sharpe", _format_num(bt_summary.get("daily_sharpe"), 3))
-
-    top5, top6, top7, top8 = st.columns(4)
     top5.metric("Total Fees", _format_num(bt_summary.get("total_fees"), 2))
-    top6.metric("Fill Gate", _format_num(bt_summary.get("fill_gate"), 2))
-    top7.metric("Slippage (bps)", _format_num(bt_summary.get("slippage_bps"), 2))
-    top8.metric("Spread Cross", _format_num(bt_summary.get("spread_cross_fraction"), 3))
+    top6.metric("Hedge Policy", str(bt_summary.get("hedge_policy", "fixed")).lower())
 
     report_paths = [
         run_dir / "train_history.csv",
@@ -1895,22 +2219,34 @@ def render_dashboard(run_dir: Path) -> None:
             unsafe_allow_html=True,
         )
         if not all_symbols_df.empty:
+            overview_cols = [
+                c
+                for c in [
+                    "symbol",
+                    "run_name",
+                    "backtest_version",
+                    "total_pnl",
+                    "daily_sharpe",
+                    "total_fees",
+                    "slippage_bps",
+                    "spread_cross_fraction",
+                ]
+                if c in all_symbols_df.columns
+            ]
             st.dataframe(
-                all_symbols_df[
-                    [
-                        "symbol",
-                        "run_name",
-                        "backtest_version",
-                        "total_pnl",
-                        "daily_sharpe",
-                        "total_fees",
-                        "slippage_bps",
-                        "spread_cross_fraction",
-                    ]
-                ],
+                all_symbols_df[overview_cols],
                 use_container_width=True,
                 hide_index=True,
             )
+            with st.expander("All Per-Symbol Fields", expanded=False):
+                full_df = all_symbols_df.sort_values("symbol").reset_index(drop=True)
+                st.dataframe(full_df, use_container_width=True, hide_index=True)
+                st.download_button(
+                    label="Download All-Symbol Fields (CSV)",
+                    data=full_df.to_csv(index=False).encode("utf-8"),
+                    file_name="ivdyn_all_symbols_fields.csv",
+                    mime="text/csv",
+                )
 
         try:
             pdf_bytes = _build_pdf_report_cached(str(run_dir.resolve()), _artifact_signature(report_paths))

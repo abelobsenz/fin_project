@@ -1,0 +1,71 @@
+{
+  "generated_at_utc": "2026-02-18T18:38:17.386411Z",
+  "run_dir": "/Users/abelobsenz/fin_project copy/outputs/SPY/runs/runs_2024train_full/run_20260218_183810",
+  "dataset_path": "/Users/abelobsenz/fin_project copy/outputs/SPY/datasets/dataset_test_2025_full/dataset.npz",
+  "objective": {
+    "type": "mean_minus_risk_std",
+    "risk_aversion": 0.5
+  },
+  "execution": {
+    "underlying_slippage_bps": 1.0,
+    "min_abs_shares": 20.0,
+    "max_shares": 100.0
+  },
+  "feature_spec": {
+    "use_latent": true,
+    "use_context": true,
+    "use_net_delta": true,
+    "use_spot": true
+  },
+  "baselines": {
+    "ratio_0.0": {
+      "train": {
+        "mean_pnl": 37.07139587402344,
+        "std_pnl": 328.5577087402344,
+        "objective": -127.20745849609375
+      },
+      "val": {
+        "mean_pnl": 34.2462158203125,
+        "std_pnl": 351.974365234375,
+        "objective": -141.740966796875
+      }
+    },
+    "ratio_0.85": {
+      "train": {
+        "mean_pnl": 28.63558006286621,
+        "std_pnl": 136.8920440673828,
+        "objective": -39.81044006347656
+      },
+      "val": {
+        "mean_pnl": 22.428504943847656,
+        "std_pnl": 111.28956604003906,
+        "objective": -33.216278076171875
+      }
+    },
+    "ratio_1.0": {
+      "train": {
+        "mean_pnl": 28.111835479736328,
+        "std_pnl": 121.74969482421875,
+        "objective": -32.76301193237305
+      },
+      "val": {
+        "mean_pnl": 14.666552543640137,
+        "std_pnl": 105.62915802001953,
+        "objective": -38.14802551269531
+      }
+    }
+  },
+  "learned": {
+    "train": {
+      "mean_pnl": 89.45073699951172,
+      "std_pnl": 149.3795166015625,
+      "objective": 14.760978698730469
+    },
+    "val": {
+      "mean_pnl": 12.930014610290527,
+      "std_pnl": 134.0125274658203,
+      "objective": -54.07624816894531
+    }
+  },
+  "policy_path": "/Users/abelobsenz/fin_project copy/outputs/SPY/runs/runs_2024train_full/run_20260218_183810/hedge_policy/20260218_183816/hedge_policy.pt"
+}

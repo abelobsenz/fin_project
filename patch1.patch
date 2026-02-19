@@ -1,0 +1,765 @@
+diff -ruN orig/src/ivdyn/backtest/engine.py new/src/ivdyn/backtest/engine.py
+--- orig/src/ivdyn/backtest/engine.py	2026-02-18 07:16:56.000000000 +0000
++++ new/src/ivdyn/backtest/engine.py	2026-02-18 17:11:56.760387533 +0000
+@@ -97,6 +97,12 @@
+     hedge_underlying_max_shares: int = 5000
+     hedge_underlying_slippage_bps: float = 1.0
+ 
++    # Underlying hedge policy.
++    # - "fixed": use hedge_underlying_ratio.
++    # - "learned": load a HedgePolicyBundle and predict a state-dependent ratio.
++    hedge_policy: str = "fixed"
++    hedge_policy_path: str | None = None
++
+ 
+ def _clamp01(x: float) -> float:
+     return float(np.clip(float(x), 0.0, 1.0))
+@@ -361,6 +367,25 @@
+     return pred_now, pred_next, fill_prob
+ 
+ 
++def _compute_surface_latents(*, model_bundle: ModelBundle, ds: dict[str, np.ndarray], dev: torch.device) -> np.ndarray:
++    """Compute per-date latent surface states z_t.
++
++    This is used by learned hedge policies to condition the hedge ratio on the
++    same smooth IV surface representation the model trades on.
++    """
++    model = model_bundle.model.to(dev).eval()
++    iv_surface = ds["iv_surface"].astype(np.float32)
++    n_dates = iv_surface.shape[0]
++    surface_flat = iv_surface.reshape(n_dates, -1)
++    surface_scaled = model_bundle.surface_scaler.transform(surface_flat)
++
++    with torch.no_grad():
++        sf = torch.as_tensor(surface_scaled, dtype=torch.float32, device=dev)
++        mu, _ = model.encode(sf)
++        z_now = to_numpy(mu)
++    return np.asarray(z_now, dtype=np.float32)
++
++
+ def run_backtest(cfg: BacktestConfig) -> Path:
+     run_dir = cfg.run_dir.resolve()
+     bt_dir = run_dir / "backtest"
+@@ -461,6 +486,23 @@
+ 
+     bundle = ModelBundle.load(model_path, device=dev)
+ 
++    # Optional learned hedge policy (state-dependent hedge ratio).
++    hedge_policy_bundle = None
++    hedge_policy_latents = None
++    hedge_policy_context = ds.get("context")
++    hedge_policy_kind = str(getattr(cfg, "hedge_policy", "fixed") or "fixed").strip().lower()
++    if bool(cfg.hedge_underlying_delta) and hedge_policy_kind not in {"fixed", "learned"}:
++        raise ValueError(f"Unknown hedge_policy={cfg.hedge_policy!r}; expected 'fixed' or 'learned'.")
++
++    if bool(cfg.hedge_underlying_delta) and hedge_policy_kind == "learned":
++        if not cfg.hedge_policy_path:
++            raise RuntimeError("hedge_policy='learned' requires --hedge-policy-path")
++        from ivdyn.hedge_policy import HedgePolicyBundle
++
++        hedge_policy_bundle = HedgePolicyBundle.load(Path(cfg.hedge_policy_path), device=dev)
++        if hedge_policy_bundle.feature_spec.use_latent:
++            hedge_policy_latents = _compute_surface_latents(model_bundle=bundle, ds=ds, dev=dev)
++
+     cache_path = bt_dir / "pred_cache.npz"
+     cache_meta_path = bt_dir / "pred_cache_meta.json"
+     use_cache = False
+@@ -1138,7 +1180,24 @@
+                     stacklevel=2,
+                 )
+             else:
+-                hedge_shares = -float(cfg.hedge_underlying_ratio) * float(net_option_delta_shares)
++                hedge_ratio = float(cfg.hedge_underlying_ratio)
++                if hedge_policy_bundle is not None:
++                    from ivdyn.hedge_policy.policy import build_hedge_features
++
++                    d_i = int(d)
++                    z_d = hedge_policy_latents[d_i] if hedge_policy_latents is not None else None
++                    ctx_d = hedge_policy_context[d_i] if hedge_policy_context is not None else None
++                    spot_now_d = float(spot_by_date[d_i]) if d_i < len(spot_by_date) else float("nan")
++                    features_d = build_hedge_features(
++                        latent_z=z_d,
++                        context=ctx_d,
++                        net_option_delta_shares=float(net_option_delta_shares),
++                        spot=spot_now_d,
++                        spec=hedge_policy_bundle.feature_spec,
++                    )
++                    hedge_ratio = float(hedge_policy_bundle.predict_ratio(features_d, device=dev))
++
++                hedge_shares = -hedge_ratio * float(net_option_delta_shares)
+                 hedge_shares = float(np.round(hedge_shares))
+                 if abs(hedge_shares) >= float(cfg.hedge_underlying_min_abs_shares):
+                     hedge_shares = float(
+@@ -1367,6 +1426,8 @@
+         "hedge_avg_cp_imbalance": float(hedge_cp_imb.mean()) if len(hedge_cp_imb) else 0.0,
+         "hedge_underlying_delta": bool(cfg.hedge_underlying_delta),
+         "hedge_underlying_ratio": float(cfg.hedge_underlying_ratio),
++        "hedge_policy": str(getattr(cfg, "hedge_policy", "fixed")),
++        "hedge_policy_path": str(getattr(cfg, "hedge_policy_path", None)) if getattr(cfg, "hedge_policy_path", None) else None,
+         "hedge_underlying_min_abs_shares": float(cfg.hedge_underlying_min_abs_shares),
+         "hedge_underlying_max_shares": int(cfg.hedge_underlying_max_shares),
+         "hedge_underlying_slippage_bps": float(cfg.hedge_underlying_slippage_bps),
+diff -ruN orig/src/ivdyn/hedge_policy/__init__.py new/src/ivdyn/hedge_policy/__init__.py
+--- orig/src/ivdyn/hedge_policy/__init__.py	1970-01-01 00:00:00.000000000 +0000
++++ new/src/ivdyn/hedge_policy/__init__.py	2026-02-18 17:06:38.744888062 +0000
+@@ -0,0 +1,21 @@
++"""Learned underlying hedging policies.
++
++This module adds a lightweight, ML-driven hedge policy that can be trained
++*after* an options strategy backtest has been run.
++
++It is intentionally independent from the main IV dynamics model training:
++
++- The IV model learns the state of the implied-vol surface and price/fill heads.
++- The hedge policy learns how much underlying delta to neutralize given the
++  current market state (latent IV surface + context) and the strategy's
++  portfolio delta exposure.
++
++The hedge policy is trained offline on historical backtest episodes by
++optimizing a mean-vs-risk objective (maximize mean daily PnL, penalize daily
++PnL volatility) with realistic underlying execution costs.
++"""
++
++from ivdyn.hedge_policy.policy import HedgePolicyBundle
++from ivdyn.hedge_policy.train import HedgePolicyTrainConfig, train_hedge_policy
++
++__all__ = ["HedgePolicyBundle", "HedgePolicyTrainConfig", "train_hedge_policy"]
+diff -ruN orig/src/ivdyn/hedge_policy/policy.py new/src/ivdyn/hedge_policy/policy.py
+--- orig/src/ivdyn/hedge_policy/policy.py	1970-01-01 00:00:00.000000000 +0000
++++ new/src/ivdyn/hedge_policy/policy.py	2026-02-18 17:07:19.439875413 +0000
+@@ -0,0 +1,154 @@
++"""Hedge policy models and bundle I/O.
++
++We represent the policy as a small MLP that outputs a hedge ratio in
++[0, max_ratio]. The hedge ratio is applied to the strategy's net option delta
++exposure measured in *share* units:
++
++    hedge_shares = - hedge_ratio * net_option_delta_shares
++
++This matches the existing backtest semantics but allows the ratio to be
++state-dependent.
++"""
++
++from __future__ import annotations
++
++from dataclasses import asdict, dataclass
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++
++try:
++    import torch
++    from torch import nn
++except Exception as exc:  # pragma: no cover
++    raise RuntimeError("PyTorch is required for hedge policies.") from exc
++
++
++@dataclass(frozen=True, slots=True)
++class HedgeFeatureSpec:
++    """Controls what goes into the policy feature vector."""
++
++    use_latent: bool = True
++    use_context: bool = True
++    use_net_delta: bool = True
++    use_spot: bool = True
++
++
++def build_hedge_features(
++    *,
++    latent_z: np.ndarray | None,
++    context: np.ndarray | None,
++    net_option_delta_shares: float,
++    spot: float,
++    spec: HedgeFeatureSpec,
++) -> np.ndarray:
++    parts: list[np.ndarray] = []
++    if spec.use_latent:
++        if latent_z is None:
++            raise ValueError("latent_z is required when use_latent=True")
++        parts.append(np.asarray(latent_z, dtype=np.float32).reshape(-1))
++    if spec.use_context:
++        if context is None:
++            raise ValueError("context is required when use_context=True")
++        parts.append(np.asarray(context, dtype=np.float32).reshape(-1))
++    if spec.use_net_delta:
++        parts.append(np.asarray([float(net_option_delta_shares)], dtype=np.float32))
++    if spec.use_spot:
++        parts.append(np.asarray([float(spot)], dtype=np.float32))
++    if not parts:
++        raise ValueError("Empty hedge feature vector (spec disabled all inputs)")
++    return np.concatenate(parts, axis=0).astype(np.float32)
++
++
++class HedgeRatioMLP(nn.Module):
++    def __init__(self, input_dim: int, hidden_dim: int = 64, depth: int = 2, max_ratio: float = 1.25):
++        super().__init__()
++        if input_dim <= 0:
++            raise ValueError("input_dim must be > 0")
++        if depth < 1:
++            raise ValueError("depth must be >= 1")
++        self.max_ratio = float(max_ratio)
++
++        layers: list[nn.Module] = []
++        dim = input_dim
++        for _ in range(int(depth)):
++            layers.append(nn.Linear(dim, int(hidden_dim)))
++            layers.append(nn.ReLU())
++            dim = int(hidden_dim)
++        layers.append(nn.Linear(dim, 1))
++        self.net = nn.Sequential(*layers)
++
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        # Output in [0, max_ratio].
++        return torch.sigmoid(self.net(x)).reshape(-1) * float(self.max_ratio)
++
++
++@dataclass(slots=True)
++class HedgePolicyBundle:
++    """Serializable wrapper around the trained policy."""
++
++    model: HedgeRatioMLP
++    feature_spec: HedgeFeatureSpec
++    feature_mean: np.ndarray
++    feature_std: np.ndarray
++
++    def save(self, path: Path) -> None:
++        path = Path(path)
++        path.parent.mkdir(parents=True, exist_ok=True)
++
++        payload: dict[str, Any] = {
++            "version": "hedge_policy_v1",
++            "model": {
++                "input_dim": int(self.feature_mean.size),
++                "hidden_dim": int(getattr(self.model.net[0], "out_features", 64)),
++                "depth": int((len(self.model.net) - 1) // 2),
++                "max_ratio": float(self.model.max_ratio),
++                "state_dict": self.model.state_dict(),
++            },
++            "feature_spec": asdict(self.feature_spec),
++            "feature_mean": np.asarray(self.feature_mean, dtype=np.float32),
++            "feature_std": np.asarray(self.feature_std, dtype=np.float32),
++        }
++        torch.save(payload, path)
++
++    @classmethod
++    def load(cls, path: Path, device: str | torch.device | None = None) -> "HedgePolicyBundle":
++        path = Path(path)
++        map_location = device or "cpu"
++        try:
++            payload = torch.load(path, map_location=map_location, weights_only=False)
++        except TypeError:
++            payload = torch.load(path, map_location=map_location)
++
++        if payload.get("version") != "hedge_policy_v1":
++            raise ValueError(f"Unsupported hedge policy bundle version: {payload.get('version')!r}")
++
++        m = payload["model"]
++        model = HedgeRatioMLP(
++            input_dim=int(m["input_dim"]),
++            hidden_dim=int(m.get("hidden_dim", 64)),
++            depth=int(m.get("depth", 2)),
++            max_ratio=float(m.get("max_ratio", 1.25)),
++        )
++        model.load_state_dict(m["state_dict"])
++        model.to(map_location)
++        model.eval()
++
++        spec = HedgeFeatureSpec(**(payload.get("feature_spec") or {}))
++        mean = np.asarray(payload["feature_mean"], dtype=np.float32).reshape(-1)
++        std = np.asarray(payload["feature_std"], dtype=np.float32).reshape(-1)
++        std = np.where(std > 1e-12, std, 1.0).astype(np.float32)
++        return cls(model=model, feature_spec=spec, feature_mean=mean, feature_std=std)
++
++    def predict_ratio(self, features: np.ndarray, *, device: str | torch.device | None = None) -> float:
++        x = np.asarray(features, dtype=np.float32).reshape(1, -1)
++        if x.shape[1] != int(self.feature_mean.size):
++            raise ValueError(f"Feature dim mismatch: got {x.shape[1]}, expected {int(self.feature_mean.size)}")
++
++        x = (x - self.feature_mean.reshape(1, -1)) / self.feature_std.reshape(1, -1)
++        dev = device or next(self.model.parameters()).device
++        with torch.no_grad():
++            xt = torch.as_tensor(x, dtype=torch.float32, device=dev)
++            r = self.model(xt).reshape(-1)
++            return float(r.detach().cpu().numpy()[0])
+diff -ruN orig/src/ivdyn/hedge_policy/train.py new/src/ivdyn/hedge_policy/train.py
+--- orig/src/ivdyn/hedge_policy/train.py	1970-01-01 00:00:00.000000000 +0000
++++ new/src/ivdyn/hedge_policy/train.py	2026-02-18 17:08:41.743367476 +0000
+@@ -0,0 +1,382 @@
++"""Training loop for a learned underlying hedge policy.
++
++This is intentionally *not* full RL: the current ivdyn backtest holds option
++positions from close-to-close (one day), and the underlying hedge is also
++close-to-close. That makes hedging a per-day decision that can be learned as a
++"contextual" policy from historical episodes.
++
++We train a small MLP that maps (latent IV surface state + context + net option
++delta + spot) -> hedge ratio.
++
++Objective:
++    maximize mean daily PnL - risk_aversion * std(daily PnL)
++
++where daily PnL is computed using the historical next-day underlying move and
++the option PnL from the backtest, with realistic underlying slippage costs.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import datetime, timezone
++import json
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++import pandas as pd
++
++try:
++    import torch
++    from torch import nn
++except Exception as exc:  # pragma: no cover
++    raise RuntimeError("PyTorch is required for hedge policy training.") from exc
++
++from ivdyn.hedge_policy.policy import HedgeFeatureSpec, HedgePolicyBundle, HedgeRatioMLP, build_hedge_features
++from ivdyn.model import ModelBundle, device_auto, to_numpy
++
++
++@dataclass(slots=True)
++class HedgePolicyTrainConfig:
++    run_dir: Path
++    dataset_path: Path
++    out_dir: Path | None = None
++    device: str | None = None
++
++    # Policy network.
++    hidden_dim: int = 64
++    depth: int = 2
++    max_ratio: float = 1.25
++
++    # Training.
++    epochs: int = 400
++    lr: float = 3e-3
++    weight_decay: float = 1e-4
++    train_frac: float = 0.7
++    seed: int = 7
++
++    # Objective.
++    risk_aversion: float = 0.50
++    # Underlying execution.
++    underlying_slippage_bps: float = 1.0
++    min_abs_shares: float = 20.0
++    max_shares: float = 200.0
++    smooth_deadzone_temp: float = 5.0
++
++    feature_spec: HedgeFeatureSpec = HedgeFeatureSpec()
++
++
++def _load_dataset_npz(path: Path) -> dict[str, np.ndarray]:
++    npz = np.load(path, allow_pickle=True)
++    out: dict[str, np.ndarray] = {}
++    for k in npz.files:
++        arr = npz[k]
++        if arr.dtype == object:
++            arr = arr.astype(str)
++        out[k] = arr
++    return out
++
++
++def _read_backtest_table(bt_dir: Path, stem: str) -> pd.DataFrame:
++    p = bt_dir / f"{stem}.parquet"
++    if p.exists():
++        return pd.read_parquet(p)
++    c = bt_dir / f"{stem}.csv"
++    if c.exists():
++        return pd.read_csv(c)
++    raise FileNotFoundError(f"Missing backtest artifact: {p} (or {c})")
++
++
++def _compute_latents(bundle: ModelBundle, ds: dict[str, np.ndarray], dev: torch.device) -> np.ndarray:
++    model = bundle.model.to(dev).eval()
++    iv_surface = ds["iv_surface"].astype(np.float32)
++    n_dates = iv_surface.shape[0]
++    surface_flat = iv_surface.reshape(n_dates, -1)
++    surface_scaled = bundle.surface_scaler.transform(surface_flat)
++    with torch.no_grad():
++        sf = torch.as_tensor(surface_scaled, dtype=torch.float32, device=dev)
++        mu, _ = model.encode(sf)
++        z_now = to_numpy(mu)
++    return np.asarray(z_now, dtype=np.float32)
++
++
++def _smooth_abs(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
++    return torch.sqrt(x * x + eps)
++
++
++def _soft_deadzone(x: torch.Tensor, *, min_abs: float, temp: float) -> torch.Tensor:
++    """Smooth approximation of: x if |x|>=min_abs else 0."""
++    if min_abs <= 0:
++        return x
++    t = float(max(temp, 1e-6))
++    gate = torch.sigmoid((_smooth_abs(x) - float(min_abs)) / t)
++    return x * gate
++
++
++def _hedge_pnl_differentiable(
++    *,
++    spot_now: torch.Tensor,
++    spot_next: torch.Tensor,
++    shares: torch.Tensor,
++    slippage_bps: float,
++) -> torch.Tensor:
++    """Differentiable approximation to underlying close-to-close PnL with costs.
++
++    PnL ~= shares*(spot_next-spot_now) - 2*slip*spot_now*|shares|
++    """
++    slip = float(slippage_bps) / 1e4
++    gross = shares * (spot_next - spot_now)
++    tc = 2.0 * slip * spot_now * _smooth_abs(shares)
++    return gross - tc
++
++
++def _pnl_objective(pnl: torch.Tensor, risk_aversion: float) -> torch.Tensor:
++    # Maximize mean - risk_aversion * std.
++    mean = pnl.mean()
++    std = pnl.std(unbiased=False)
++    return mean - float(risk_aversion) * std
++
++
++def train_hedge_policy(cfg: HedgePolicyTrainConfig) -> Path:
++    run_dir = Path(cfg.run_dir).resolve()
++    bt_dir = run_dir / "backtest"
++    if not bt_dir.exists():
++        raise RuntimeError(
++            f"No backtest directory found at {bt_dir}. Run `ivdyn backtest ...` first to create trade episodes."
++        )
++
++    out_dir = (Path(cfg.out_dir) if cfg.out_dir else (run_dir / "hedge_policy" / _utc_tag())).resolve()
++    out_dir.mkdir(parents=True, exist_ok=True)
++
++    ds = _load_dataset_npz(Path(cfg.dataset_path).resolve())
++    dates = ds["dates"].astype(str)
++    spot_by_date = np.asarray(ds.get("spot"), dtype=np.float32).reshape(-1)
++    context = np.asarray(ds.get("context"), dtype=np.float32)
++
++    daily = _read_backtest_table(bt_dir, "daily")
++    hedges = _read_backtest_table(bt_dir, "hedges")
++    hedge_by_day = hedges.groupby("date", as_index=False).agg(net_option_delta_shares=("net_option_delta_shares", "sum"))
++
++    # Join to a full per-date table (dates[:-1] are tradable days).
++    day_df = pd.DataFrame({"date": dates[:-1]})
++    day_df = day_df.merge(daily[["date", "options_pnl"]], on="date", how="left")
++    day_df = day_df.merge(hedge_by_day, on="date", how="left")
++    day_df["options_pnl"] = pd.to_numeric(day_df.get("options_pnl"), errors="coerce").fillna(0.0)
++    day_df["net_option_delta_shares"] = pd.to_numeric(day_df.get("net_option_delta_shares"), errors="coerce").fillna(0.0)
++
++    # Map date -> date_idx.
++    date_to_idx = {str(d): i for i, d in enumerate(dates)}
++    day_df["date_idx"] = day_df["date"].map(date_to_idx).astype(int)
++    day_df = day_df.sort_values("date_idx").reset_index(drop=True)
++
++    dev = torch.device(cfg.device) if cfg.device else device_auto()
++    bundle = ModelBundle.load(run_dir / "model.pt", device=dev)
++    z_now = _compute_latents(bundle, ds, dev)
++
++    # Build features.
++    feats: list[np.ndarray] = []
++    for _, row in day_df.iterrows():
++        d = int(row["date_idx"])
++        spot = float(spot_by_date[d]) if d < len(spot_by_date) else float("nan")
++        ctx = context[d] if d < len(context) else None
++        zz = z_now[d] if d < len(z_now) else None
++        feats.append(
++            build_hedge_features(
++                latent_z=zz,
++                context=ctx,
++                net_option_delta_shares=float(row["net_option_delta_shares"]),
++                spot=spot,
++                spec=cfg.feature_spec,
++            )
++        )
++
++    X = np.stack(feats, axis=0).astype(np.float32)
++    y_opt_pnl = day_df["options_pnl"].to_numpy(dtype=np.float32)
++    delta_shares = day_df["net_option_delta_shares"].to_numpy(dtype=np.float32)
++    spot_now = spot_by_date[day_df["date_idx"].to_numpy(dtype=int)].astype(np.float32)
++    spot_next = spot_by_date[(day_df["date_idx"].to_numpy(dtype=int) + 1)].astype(np.float32)
++
++    # Normalize features.
++    feat_mean = X.mean(axis=0)
++    feat_std = X.std(axis=0)
++    feat_std = np.where(feat_std > 1e-12, feat_std, 1.0).astype(np.float32)
++    Xn = (X - feat_mean) / feat_std
++
++    # Split by time.
++    n = Xn.shape[0]
++    n_train = int(max(1, min(n - 1, round(float(cfg.train_frac) * n))))
++    train_idx = np.arange(0, n_train)
++    val_idx = np.arange(n_train, n)
++
++    g = torch.Generator(device="cpu").manual_seed(int(cfg.seed))
++    torch.manual_seed(int(cfg.seed))
++    np.random.seed(int(cfg.seed))
++
++    model = HedgeRatioMLP(
++        input_dim=int(Xn.shape[1]),
++        hidden_dim=int(cfg.hidden_dim),
++        depth=int(cfg.depth),
++        max_ratio=float(cfg.max_ratio),
++    ).to(dev)
++    opt = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr), weight_decay=float(cfg.weight_decay))
++
++    X_t = torch.as_tensor(Xn, dtype=torch.float32, device=dev)
++    pnl_opt_t = torch.as_tensor(y_opt_pnl, dtype=torch.float32, device=dev)
++    delta_t = torch.as_tensor(delta_shares, dtype=torch.float32, device=dev)
++    spot_now_t = torch.as_tensor(spot_now, dtype=torch.float32, device=dev)
++    spot_next_t = torch.as_tensor(spot_next, dtype=torch.float32, device=dev)
++
++    history: list[dict[str, Any]] = []
++
++    def eval_fixed_ratio(r: float, idx: np.ndarray) -> tuple[float, float, float]:
++        rr = float(r)
++        d = delta_t[idx]
++        sh = -rr * d
++        sh = torch.clamp(sh, -float(cfg.max_shares), float(cfg.max_shares))
++        sh = _soft_deadzone(sh, min_abs=float(cfg.min_abs_shares), temp=float(cfg.smooth_deadzone_temp))
++        hedge_pnl = _hedge_pnl_differentiable(spot_now=spot_now_t[idx], spot_next=spot_next_t[idx], shares=sh, slippage_bps=float(cfg.underlying_slippage_bps))
++        total = pnl_opt_t[idx] + hedge_pnl
++        mean = float(total.mean().detach().cpu())
++        std = float(total.std(unbiased=False).detach().cpu())
++        obj = float(_pnl_objective(total, float(cfg.risk_aversion)).detach().cpu())
++        return mean, std, obj
++
++    for epoch in range(1, int(cfg.epochs) + 1):
++        model.train()
++        opt.zero_grad(set_to_none=True)
++        r = model(X_t)
++        # Convert to shares.
++        sh = -r * delta_t
++        sh = torch.clamp(sh, -float(cfg.max_shares), float(cfg.max_shares))
++        sh = _soft_deadzone(sh, min_abs=float(cfg.min_abs_shares), temp=float(cfg.smooth_deadzone_temp))
++
++        hedge_pnl = _hedge_pnl_differentiable(
++            spot_now=spot_now_t,
++            spot_next=spot_next_t,
++            shares=sh,
++            slippage_bps=float(cfg.underlying_slippage_bps),
++        )
++        total_pnl = pnl_opt_t + hedge_pnl
++
++        train_pnl = total_pnl[train_idx]
++        val_pnl = total_pnl[val_idx] if val_idx.size else None
++
++        objective = _pnl_objective(train_pnl, float(cfg.risk_aversion))
++        loss = -objective
++        loss.backward()
++        nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
++        opt.step()
++
++        if epoch == 1 or epoch % 10 == 0 or epoch == int(cfg.epochs):
++            model.eval()
++            with torch.no_grad():
++                r_eval = model(X_t)
++                sh_eval = -r_eval * delta_t
++                sh_eval = torch.clamp(sh_eval, -float(cfg.max_shares), float(cfg.max_shares))
++                sh_eval = _soft_deadzone(sh_eval, min_abs=float(cfg.min_abs_shares), temp=float(cfg.smooth_deadzone_temp))
++                hedge_eval = _hedge_pnl_differentiable(spot_now=spot_now_t, spot_next=spot_next_t, shares=sh_eval, slippage_bps=float(cfg.underlying_slippage_bps))
++                total_eval = pnl_opt_t + hedge_eval
++                tr = total_eval[train_idx]
++                va = total_eval[val_idx] if val_idx.size else None
++
++                rec: dict[str, Any] = {
++                    "epoch": int(epoch),
++                    "train_mean_pnl": float(tr.mean().cpu()),
++                    "train_std_pnl": float(tr.std(unbiased=False).cpu()),
++                    "train_objective": float(_pnl_objective(tr, float(cfg.risk_aversion)).cpu()),
++                    "avg_ratio": float(r_eval.mean().cpu()),
++                    "avg_abs_shares": float(_smooth_abs(sh_eval).mean().cpu()),
++                }
++                if va is not None:
++                    rec.update(
++                        {
++                            "val_mean_pnl": float(va.mean().cpu()),
++                            "val_std_pnl": float(va.std(unbiased=False).cpu()),
++                            "val_objective": float(_pnl_objective(va, float(cfg.risk_aversion)).cpu()),
++                        }
++                    )
++                history.append(rec)
++
++    # Baselines.
++    baselines = {}
++    for name, r0 in {"ratio_0.0": 0.0, "ratio_0.85": 0.85, "ratio_1.0": 1.0}.items():
++        baselines[name] = {
++            "train": dict(zip(["mean_pnl", "std_pnl", "objective"], eval_fixed_ratio(r0, train_idx))),
++            "val": dict(zip(["mean_pnl", "std_pnl", "objective"], eval_fixed_ratio(r0, val_idx))) if val_idx.size else None,
++        }
++
++    # Final learned evaluation.
++    model.eval()
++    with torch.no_grad():
++        r_final = model(X_t)
++        sh_final = -r_final * delta_t
++        sh_final = torch.clamp(sh_final, -float(cfg.max_shares), float(cfg.max_shares))
++        sh_final = _soft_deadzone(sh_final, min_abs=float(cfg.min_abs_shares), temp=float(cfg.smooth_deadzone_temp))
++        hedge_final = _hedge_pnl_differentiable(spot_now=spot_now_t, spot_next=spot_next_t, shares=sh_final, slippage_bps=float(cfg.underlying_slippage_bps))
++        total_final = pnl_opt_t + hedge_final
++        learned = {
++            "train": {
++                "mean_pnl": float(total_final[train_idx].mean().cpu()),
++                "std_pnl": float(total_final[train_idx].std(unbiased=False).cpu()),
++                "objective": float(_pnl_objective(total_final[train_idx], float(cfg.risk_aversion)).cpu()),
++            },
++            "val": {
++                "mean_pnl": float(total_final[val_idx].mean().cpu()),
++                "std_pnl": float(total_final[val_idx].std(unbiased=False).cpu()),
++                "objective": float(_pnl_objective(total_final[val_idx], float(cfg.risk_aversion)).cpu()),
++            }
++            if val_idx.size
++            else None,
++        }
++
++    # Save bundle.
++    bundle_out = HedgePolicyBundle(
++        model=model.to("cpu"),
++        feature_spec=cfg.feature_spec,
++        feature_mean=np.asarray(feat_mean, dtype=np.float32),
++        feature_std=np.asarray(feat_std, dtype=np.float32),
++    )
++    policy_path = out_dir / "hedge_policy.pt"
++    bundle_out.save(policy_path)
++
++    pd.DataFrame(history).to_csv(out_dir / "train_history.csv", index=False)
++    metrics = {
++        "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
++        "run_dir": run_dir.as_posix(),
++        "dataset_path": str(Path(cfg.dataset_path).resolve()),
++        "objective": {
++            "type": "mean_minus_risk_std",
++            "risk_aversion": float(cfg.risk_aversion),
++        },
++        "execution": {
++            "underlying_slippage_bps": float(cfg.underlying_slippage_bps),
++            "min_abs_shares": float(cfg.min_abs_shares),
++            "max_shares": float(cfg.max_shares),
++        },
++        "feature_spec": {
++            "use_latent": bool(cfg.feature_spec.use_latent),
++            "use_context": bool(cfg.feature_spec.use_context),
++            "use_net_delta": bool(cfg.feature_spec.use_net_delta),
++            "use_spot": bool(cfg.feature_spec.use_spot),
++        },
++        "baselines": baselines,
++        "learned": learned,
++        "policy_path": policy_path.as_posix(),
++    }
++    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
++    (out_dir / "README.txt").write_text(
++        """Learned hedge policy trained by ivdyn.
++
++To use this policy in a backtest:
++
++  ivdyn backtest --run-dir <RUN_DIR> --dataset <DATASET> \\
++    --hedge-policy learned --hedge-policy-path hedge_policy/</...>/hedge_policy.pt
++""",
++        encoding="utf-8",
++    )
++
++    return out_dir
++
++
++def _utc_tag() -> str:
++    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+diff -ruN orig/src/ivdyn/utils/cli.py new/src/ivdyn/utils/cli.py
+--- orig/src/ivdyn/utils/cli.py	2026-02-18 07:16:56.000000000 +0000
++++ new/src/ivdyn/utils/cli.py	2026-02-18 17:13:56.428728096 +0000
+@@ -201,10 +201,46 @@
+             vertical_wing_rich_signal_penalty=getattr(ns, "vertical_wing_rich_signal_penalty", 0.75),
+             vertical_skip_if_no_wing=bool(getattr(ns, "vertical_skip_if_no_wing", True)),
+             hedge_underlying_delta=bool(getattr(ns, "hedge_underlying_delta", False)),
+-            hedge_underlying_ratio=getattr(ns, "hedge_underlying_ratio", 0.5),
++            hedge_underlying_ratio=getattr(ns, "hedge_underlying_ratio", 1.0),
+             hedge_underlying_min_abs_shares=getattr(ns, "hedge_underlying_min_abs_shares", 25.0),
+             hedge_underlying_max_shares=getattr(ns, "hedge_underlying_max_shares", 5000),
+             hedge_underlying_slippage_bps=getattr(ns, "hedge_underlying_slippage_bps", 1.0),
++            hedge_policy=getattr(ns, "hedge_policy", "fixed"),
++            hedge_policy_path=getattr(ns, "hedge_policy_path", None),
++        )
++    )
++    print(out_dir)
++
++
++def _train_hedge_policy_command(ns: Any) -> None:
++    """Train a state-dependent underlying hedge ratio policy.
++
++    This uses an existing backtest run under <run_dir>/backtest to build daily
++    hedge episodes (options PnL and net option delta) and then learns an MLP
++    mapping model state -> hedge ratio.
++    """
++    from ivdyn.hedge_policy import HedgePolicyTrainConfig, train_hedge_policy
++
++    run_dir = _resolve_run_dir(ns.run_dir)
++    dataset = _resolve_dataset(ns.dataset, run_dir)
++    out_dir = train_hedge_policy(
++        HedgePolicyTrainConfig(
++            run_dir=run_dir,
++            dataset_path=dataset,
++            out_dir=_to_path(ns.out_dir).resolve() if ns.out_dir else None,
++            device=ns.device,
++            hidden_dim=ns.hidden_dim,
++            depth=ns.depth,
++            max_ratio=ns.max_ratio,
++            epochs=ns.epochs,
++            lr=ns.lr,
++            weight_decay=ns.weight_decay,
++            train_frac=ns.train_frac,
++            seed=ns.seed,
++            risk_aversion=ns.risk_aversion,
++            underlying_slippage_bps=ns.underlying_slippage_bps,
++            min_abs_shares=ns.min_abs_shares,
++            max_shares=ns.max_shares,
+         )
+     )
+     print(out_dir)
+@@ -985,8 +1021,43 @@
+     p.add_argument("--hedge-underlying-min-abs-shares", type=float, default=20.0, help="Do not place a hedge trade unless |shares| exceeds this threshold.")
+     p.add_argument("--hedge-underlying-max-shares", type=int, default=200)
+     p.add_argument("--hedge-underlying-slippage-bps", type=float, default=1.0)
++    p.add_argument(
++        "--hedge-policy",
++        choices=["fixed", "learned"],
++        default="fixed",
++        help="Underlying hedge policy. 'fixed' uses --hedge-underlying-ratio. 'learned' loads --hedge-policy-path.",
++    )
++    p.add_argument(
++        "--hedge-policy-path",
++        default=None,
++        help="Path to a trained hedge_policy.pt (required when --hedge-policy learned).",
++    )
+     p.set_defaults(func=_backtest_command)
+ 
++    p = sub.add_parser("train-hedge-policy")
++    p.add_argument("--run-dir", default=None, help="Run directory containing model.pt and backtest artifacts.")
++    p.add_argument("--dataset", default=None, help="Dataset used for the backtest (defaults to train_summary.json).")
++    p.add_argument("--out-dir", default=None, help="Output directory for the trained policy (default: <run_dir>/hedge_policy/<timestamp>).")
++    p.add_argument("--device", default=None)
++    p.add_argument("--hidden-dim", type=int, default=64)
++    p.add_argument("--depth", type=int, default=2)
++    p.add_argument("--max-ratio", type=float, default=1.25)
++    p.add_argument("--epochs", type=int, default=400)
++    p.add_argument("--lr", type=float, default=3e-3)
++    p.add_argument("--weight-decay", type=float, default=1e-4)
++    p.add_argument("--train-frac", type=float, default=0.7, help="Fraction of days (by time) used for training; remaining are validation.")
++    p.add_argument("--seed", type=int, default=7)
++    p.add_argument(
++        "--risk-aversion",
++        type=float,
++        default=0.50,
++        help="Objective is mean(daily_pnl) - risk_aversion*std(daily_pnl). Higher => more hedging / less variance.",
++    )
++    p.add_argument("--underlying-slippage-bps", type=float, default=1.0)
++    p.add_argument("--min-abs-shares", type=float, default=20.0)
++    p.add_argument("--max-shares", type=float, default=200.0)
++    p.set_defaults(func=_train_hedge_policy_command)
++
+     p = sub.add_parser("ui")
+     p.add_argument("--run-dir", default=None)
+     p.set_defaults(func=_ui_command)

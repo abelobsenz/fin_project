@@ -22,7 +22,7 @@ from ivdyn.finance import bs_delta
 from ivdyn.eval.metrics import probabilistic_sharpe_ratio, sample_skew_kurtosis
 
 _OPRA_TICKER_RE = re.compile(r"^O:(?P<underlying>[A-Z]+)(?P<exp>\d{6})[CP]\d{8}$")
-_BACKTEST_VERSION = "2026-02-18-realistic-costs-fill-psr-v6"
+_BACKTEST_VERSION = "2026-02-19-rf45-no-alpha-v1"
 
 
 @dataclass(slots=True)
@@ -36,6 +36,7 @@ class BacktestConfig:
     num_workers: int = 0
     inference_batch_size: int = 65536
     initial_capital: float = 10_000.0
+    risk_free_rate_annual: float = 0.045
 
     fill_gate: float = 0.65
     slippage_bps: float = 10.0
@@ -97,9 +98,24 @@ class BacktestConfig:
     hedge_underlying_max_shares: int = 5000
     hedge_underlying_slippage_bps: float = 1.0
 
+    # Underlying hedge policy.
+    # - "fixed": use hedge_underlying_ratio.
+    # - "learned": load a HedgePolicyBundle and predict a state-dependent ratio.
+    hedge_policy: str = "fixed"
+    hedge_policy_path: str | None = None
+
 
 def _clamp01(x: float) -> float:
     return float(np.clip(float(x), 0.0, 1.0))
+
+
+def _annual_to_daily_rate(rate_annual: float, *, periods_per_year: int = 252) -> float:
+    r = float(rate_annual)
+    if not np.isfinite(r):
+        return 0.0
+    if r <= -1.0:
+        r = -0.999999999
+    return float((1.0 + r) ** (1.0 / float(max(int(periods_per_year), 1))) - 1.0)
 
 
 def _load_dataset(path: Path) -> dict[str, np.ndarray]:
@@ -361,6 +377,25 @@ def _predict_contracts(
     return pred_now, pred_next, fill_prob
 
 
+def _compute_surface_latents(*, model_bundle: ModelBundle, ds: dict[str, np.ndarray], dev: torch.device) -> np.ndarray:
+    """Compute per-date latent surface states z_t.
+
+    This is used by learned hedge policies to condition the hedge ratio on the
+    same smooth IV surface representation the model trades on.
+    """
+    model = model_bundle.model.to(dev).eval()
+    iv_surface = ds["iv_surface"].astype(np.float32)
+    n_dates = iv_surface.shape[0]
+    surface_flat = iv_surface.reshape(n_dates, -1)
+    surface_scaled = model_bundle.surface_scaler.transform(surface_flat)
+
+    with torch.no_grad():
+        sf = torch.as_tensor(surface_scaled, dtype=torch.float32, device=dev)
+        mu, _ = model.encode(sf)
+        z_now = to_numpy(mu)
+    return np.asarray(z_now, dtype=np.float32)
+
+
 def run_backtest(cfg: BacktestConfig) -> Path:
     run_dir = cfg.run_dir.resolve()
     bt_dir = run_dir / "backtest"
@@ -460,6 +495,23 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     contract_indices = np.flatnonzero(universe_mask).astype(np.int32)
 
     bundle = ModelBundle.load(model_path, device=dev)
+
+    # Optional learned hedge policy (state-dependent hedge ratio).
+    hedge_policy_bundle = None
+    hedge_policy_latents = None
+    hedge_policy_context = ds.get("context")
+    hedge_policy_kind = str(getattr(cfg, "hedge_policy", "fixed") or "fixed").strip().lower()
+    if bool(cfg.hedge_underlying_delta) and hedge_policy_kind not in {"fixed", "learned"}:
+        raise ValueError(f"Unknown hedge_policy={cfg.hedge_policy!r}; expected 'fixed' or 'learned'.")
+
+    if bool(cfg.hedge_underlying_delta) and hedge_policy_kind == "learned":
+        if not cfg.hedge_policy_path:
+            raise RuntimeError("hedge_policy='learned' requires --hedge-policy-path")
+        from ivdyn.hedge_policy import HedgePolicyBundle
+
+        hedge_policy_bundle = HedgePolicyBundle.load(Path(cfg.hedge_policy_path), device=dev)
+        if hedge_policy_bundle.feature_spec.use_latent:
+            hedge_policy_latents = _compute_surface_latents(model_bundle=bundle, ds=ds, dev=dev)
 
     cache_path = bt_dir / "pred_cache.npz"
     cache_meta_path = bt_dir / "pred_cache_meta.json"
@@ -1138,7 +1190,24 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     stacklevel=2,
                 )
             else:
-                hedge_shares = -float(cfg.hedge_underlying_ratio) * float(net_option_delta_shares)
+                hedge_ratio = float(cfg.hedge_underlying_ratio)
+                if hedge_policy_bundle is not None:
+                    from ivdyn.hedge_policy.policy import build_hedge_features
+
+                    d_i = int(d)
+                    z_d = hedge_policy_latents[d_i] if hedge_policy_latents is not None else None
+                    ctx_d = hedge_policy_context[d_i] if hedge_policy_context is not None else None
+                    spot_now_d = float(spot_by_date[d_i]) if d_i < len(spot_by_date) else float("nan")
+                    features_d = build_hedge_features(
+                        latent_z=z_d,
+                        context=ctx_d,
+                        net_option_delta_shares=float(net_option_delta_shares),
+                        spot=spot_now_d,
+                        spec=hedge_policy_bundle.feature_spec,
+                    )
+                    hedge_ratio = float(hedge_policy_bundle.predict_ratio(features_d, device=dev))
+
+                hedge_shares = -hedge_ratio * float(net_option_delta_shares)
                 hedge_shares = float(np.round(hedge_shares))
                 if abs(hedge_shares) >= float(cfg.hedge_underlying_min_abs_shares):
                     hedge_shares = float(
@@ -1297,12 +1366,26 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     # Sharpe should be computed on returns, not raw dollars.
     equity_start = equity.shift(1).fillna(initial_capital)
     daily_ret = (pnl / equity_start.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    risk_free_rate_annual = float(getattr(cfg, "risk_free_rate_annual", 0.045))
+    if not np.isfinite(risk_free_rate_annual):
+        risk_free_rate_annual = 0.045
+    risk_free_rate_daily = _annual_to_daily_rate(risk_free_rate_annual, periods_per_year=252)
+    daily_excess_ret = daily_ret - risk_free_rate_daily
+
     ret_vol = float(daily_ret.std(ddof=0)) if len(daily_ret) else 0.0
     ret_mean = float(daily_ret.mean()) if len(daily_ret) else 0.0
-    daily_sharpe = float(np.sqrt(252.0) * ret_mean / ret_vol) if ret_vol > 0 else 0.0
-    ret_skew, ret_kurt = sample_skew_kurtosis(daily_ret.to_numpy(dtype=float))
-    psr_sr0_0 = probabilistic_sharpe_ratio(daily_ret.to_numpy(dtype=float), benchmark_sharpe_ann=0.0, periods_per_year=252)
+    excess_ret_vol = float(daily_excess_ret.std(ddof=0)) if len(daily_excess_ret) else 0.0
+    excess_ret_mean = float(daily_excess_ret.mean()) if len(daily_excess_ret) else 0.0
+    daily_sharpe_rf0 = float(np.sqrt(252.0) * ret_mean / ret_vol) if ret_vol > 0 else 0.0
+    daily_sharpe = float(np.sqrt(252.0) * excess_ret_mean / excess_ret_vol) if excess_ret_vol > 0 else 0.0
+    ret_skew, ret_kurt = sample_skew_kurtosis(daily_excess_ret.to_numpy(dtype=float))
+    psr_sr0_0 = probabilistic_sharpe_ratio(
+        daily_excess_ret.to_numpy(dtype=float),
+        benchmark_sharpe_ann=0.0,
+        periods_per_year=252,
+    )
 
+    total_pnl = float(pnl.sum())
     summary = {
         "backtest_version": _BACKTEST_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1314,14 +1397,21 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "trades": int(len(trades)),
         "initial_capital": initial_capital,
         "final_equity": float(equity.iloc[-1]) if len(equity) else initial_capital,
-        "total_pnl": float(pnl.sum()),
+        "total_pnl": total_pnl,
         "total_fees": float(daily.get("fees", pd.Series(dtype=float)).sum()),
         "total_options_pnl_gross": float(daily.get("options_pnl_gross", pd.Series(dtype=float)).sum()),
         "total_options_pnl": float(daily.get("options_pnl", pd.Series(dtype=float)).sum()),
         "total_hedge_pnl": float(daily.get("hedge_pnl", pd.Series(dtype=float)).sum()),
         "avg_daily_pnl": daily_mean,
         "daily_vol_pnl": daily_vol,
+        "daily_return_mean": ret_mean,
+        "daily_return_vol": ret_vol,
+        "daily_excess_return_mean": excess_ret_mean,
+        "daily_excess_return_vol": excess_ret_vol,
+        "risk_free_rate_annual": risk_free_rate_annual,
+        "risk_free_rate_daily": risk_free_rate_daily,
         "daily_sharpe": daily_sharpe,
+        "daily_sharpe_rf0": daily_sharpe_rf0,
         "return_skew": float(ret_skew) if np.isfinite(ret_skew) else float("nan"),
         "return_kurtosis": float(ret_kurt) if np.isfinite(ret_kurt) else float("nan"),
         "psr_sr0_0": float(psr_sr0_0) if np.isfinite(psr_sr0_0) else float("nan"),
@@ -1367,6 +1457,8 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "hedge_avg_cp_imbalance": float(hedge_cp_imb.mean()) if len(hedge_cp_imb) else 0.0,
         "hedge_underlying_delta": bool(cfg.hedge_underlying_delta),
         "hedge_underlying_ratio": float(cfg.hedge_underlying_ratio),
+        "hedge_policy": str(getattr(cfg, "hedge_policy", "fixed")),
+        "hedge_policy_path": str(getattr(cfg, "hedge_policy_path", None)) if getattr(cfg, "hedge_policy_path", None) else None,
         "hedge_underlying_min_abs_shares": float(cfg.hedge_underlying_min_abs_shares),
         "hedge_underlying_max_shares": int(cfg.hedge_underlying_max_shares),
         "hedge_underlying_slippage_bps": float(cfg.hedge_underlying_slippage_bps),

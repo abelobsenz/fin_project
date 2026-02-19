@@ -1,0 +1,79 @@
+{
+  "generated_at_utc": "2026-02-19T01:46:36.066691Z",
+  "run_dir": "/Users/abelobsenz/fin_project copy/outputs/SPY/runs/runs_2024train_full/run_20260218_185603",
+  "dataset_path": "/Users/abelobsenz/fin_project copy/outputs/SPY/datasets/dataset_test_2025_full/dataset.npz",
+  "objective": {
+    "type": "mean_minus_risk_std",
+    "risk_aversion": 0.5,
+    "target_ratio": 1.0,
+    "target_ratio_penalty": 0.05,
+    "turnover_penalty": 0.02
+  },
+  "execution": {
+    "underlying_slippage_bps": 1.0,
+    "min_abs_shares": 20.0,
+    "soft_cap_shares": 35.0,
+    "index_max_shares": 60.0,
+    "single_name_max_shares": 40.0,
+    "max_shares": 100.0,
+    "effective_hard_cap_shares": 60.0,
+    "underlying_symbol": "SPY"
+  },
+  "feature_spec": {
+    "use_latent": true,
+    "use_context": true,
+    "use_net_delta": true,
+    "use_spot": true
+  },
+  "baselines": {
+    "ratio_0.0": {
+      "train": {
+        "mean_pnl": -16.96788215637207,
+        "std_pnl": 138.2014617919922,
+        "objective": -86.06863403320312
+      },
+      "val": {
+        "mean_pnl": 5.1570916175842285,
+        "std_pnl": 105.77137756347656,
+        "objective": -47.728614807128906
+      }
+    },
+    "ratio_0.85": {
+      "train": {
+        "mean_pnl": -14.128190994262695,
+        "std_pnl": 72.98295593261719,
+        "objective": -50.79759216308594
+      },
+      "val": {
+        "mean_pnl": -2.5847198963165283,
+        "std_pnl": 54.260459899902344,
+        "objective": -29.909881591796875
+      }
+    },
+    "ratio_1.0": {
+      "train": {
+        "mean_pnl": -12.878156661987305,
+        "std_pnl": 64.32097625732422,
+        "objective": -45.27031326293945
+      },
+      "val": {
+        "mean_pnl": -5.508877754211426,
+        "std_pnl": 40.46641540527344,
+        "objective": -26.000642776489258
+      }
+    }
+  },
+  "learned": {
+    "train": {
+      "mean_pnl": 6.9557719230651855,
+      "std_pnl": 62.36521530151367,
+      "objective": -24.475337982177734
+    },
+    "val": {
+      "mean_pnl": -8.273578643798828,
+      "std_pnl": 52.260345458984375,
+      "objective": -34.687164306640625
+    }
+  },
+  "policy_path": "/Users/abelobsenz/fin_project copy/outputs/SPY/runs/runs_2024train_full/run_20260218_185603/hedge_policy/20260219_014634/hedge_policy.pt"
+}

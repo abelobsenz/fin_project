@@ -1,0 +1,21 @@
+{
+  "dataset_name": "dataset.npz",
+  "model_name": "model.pt",
+  "dataset_mtime": 1771367168,
+  "model_mtime": 1771439499,
+  "dataset_size": 6274483,
+  "model_size": 755649,
+  "universe_n": 24324,
+  "universe_cfg": {
+    "min_dte": 7,
+    "max_dte": 75,
+    "min_moneyness": 0.88,
+    "max_moneyness": 1.12,
+    "max_rel_spread": 0.1,
+    "vertical_wing_min_moneyness": 0.75,
+    "vertical_wing_max_moneyness": 1.3,
+    "vertical_wing_max_rel_spread": 0.15,
+    "start_date": null,
+    "end_date": null
+  }
+}
