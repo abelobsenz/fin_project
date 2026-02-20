@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from io import BytesIO
 import json
 import os
@@ -21,6 +22,44 @@ except Exception:  # pragma: no cover - optional dependency guard
     px = None  # type: ignore[assignment]
     go = None  # type: ignore[assignment]
     PLOTLY_AVAILABLE = False
+
+
+_WINDOW_TUNING = "Parameter Tuning"
+_WINDOW_DASHBOARD = "Dashboard"
+_BACKTEST_WINDOW_KEY = "backtest_ui_window"
+_BACKTEST_WINDOW_PENDING_KEY = "_backtest_ui_window_pending"
+_BACKTEST_SCOPE_KEY = "backtest_scope_mode"
+_BACKTEST_TUNING_SEED_KEY = "_backtest_tuning_initialized"
+_BACKTEST_TUNING_CACHE_KEY = "_backtest_tuning_cache"
+_BACKTEST_TUNING_SHARED_PROFILE_KEY = "_shared"
+_DATASET_SEED_KEY = "_dataset_seed_run"
+_TUNING_PREFIX = "bt_param_"
+_BACKTEST_UI_DEFAULTS: dict[str, object] = {
+    "start_date": "",
+    "end_date": "",
+    "initial_capital": 10_000.0,
+    "strategy_mode": "vertical",
+    "fill_model": "expected",
+    "fill_gate": 0.45,
+    "signal_abs_gate": 0.06,
+    "min_edge_to_cost_ratio": 2.50,
+    "max_trades_per_day": 2,
+    "max_contracts_per_trade": 1,
+    "max_rel_spread": 0.50,
+    "slippage_bps": 10.0,
+    "spread_cross_fraction": 0.75,
+    "option_commission_per_contract": 0.65,
+    "option_fee_per_contract": 0.05,
+    "hedge_underlying_delta": True,
+    "hedge_underlying_ratio": 1.0,
+    "hedge_underlying_min_abs_shares": 15.0,
+    "hedge_underlying_max_shares": 50,
+    "hedge_underlying_slippage_bps": 1.0,
+    "enforce_portfolio_constraints": True,
+    "buying_power_leverage": 1.0,
+    "option_short_margin_rate": 0.20,
+    "underlying_margin_rate": 0.50,
+}
 
 
 def _inject_style() -> None:
@@ -198,10 +237,518 @@ def _resolve_run_dir() -> Path:
                 manual_default = str(latest_run)
             run_dir_str = st.text_input("Run directory", value=manual_default, key="manual_run_dir")
 
-        dataset_str = st.text_input("Dataset path", value="outputs/datasets/dataset/dataset.npz")
-        st.session_state["dataset_path"] = dataset_str
+    run_dir = Path(run_dir_str).expanduser()
+    run_key = str(run_dir.resolve())
+    dataset_default = _dataset_default_for_run(run_dir)
+    if st.session_state.get(_DATASET_SEED_KEY) != run_key:
+        st.session_state["dataset_path"] = dataset_default
+        st.session_state[_DATASET_SEED_KEY] = run_key
 
-    return Path(run_dir_str).expanduser()
+    with st.sidebar:
+        st.text_input("Dataset path", key="dataset_path")
+
+    return run_dir
+
+
+def _dataset_default_for_run(run_dir: Path) -> str:
+    train_summary = run_dir / "train_summary.json"
+    if train_summary.exists():
+        try:
+            payload = json.loads(train_summary.read_text(encoding="utf-8"))
+            raw = str(payload.get("dataset_path", "")).strip()
+            if raw:
+                return str(Path(raw).expanduser())
+        except Exception:
+            pass
+    return "outputs/datasets/dataset/dataset.npz"
+
+
+def _parse_optional_date(raw: str, *, field_name: str) -> str | None:
+    txt = str(raw or "").strip()
+    if not txt:
+        return None
+    try:
+        return date.fromisoformat(txt).isoformat()
+    except Exception as exc:
+        raise ValueError(f"{field_name} must be YYYY-MM-DD (example: 2025-06-15).") from exc
+
+
+def _backtest_summary_defaults(run_dir: Path) -> dict[str, object]:
+    defaults = dict(_BACKTEST_UI_DEFAULTS)
+    summary = _read_json(run_dir / "backtest" / "summary.json")
+    for key in defaults:
+        if key in {"start_date", "end_date"}:
+            raw = summary.get(key)
+            defaults[key] = str(raw).strip() if raw else ""
+            continue
+        raw = summary.get(key)
+        if raw is not None:
+            defaults[key] = raw
+    return defaults
+
+
+def _seed_backtest_tuning_state(run_dir: Path) -> None:
+    _ = run_dir
+    cache = st.session_state.get(_BACKTEST_TUNING_CACHE_KEY)
+    if not isinstance(cache, dict):
+        cache = {}
+    st.session_state[_BACKTEST_TUNING_CACHE_KEY] = cache
+
+    shared_profile = (
+        cache.get(_BACKTEST_TUNING_SHARED_PROFILE_KEY)
+        if isinstance(cache.get(_BACKTEST_TUNING_SHARED_PROFILE_KEY), dict)
+        else None
+    )
+    if bool(st.session_state.get(_BACKTEST_TUNING_SEED_KEY, False)):
+        for key, default_value in _BACKTEST_UI_DEFAULTS.items():
+            state_key = f"{_TUNING_PREFIX}{key}"
+            if state_key not in st.session_state:
+                if shared_profile is not None and key in shared_profile:
+                    st.session_state[state_key] = shared_profile[key]
+                else:
+                    st.session_state[state_key] = default_value
+        return
+
+    defaults = dict(_BACKTEST_UI_DEFAULTS)
+    if shared_profile is not None:
+        for key, value in shared_profile.items():
+            if key in defaults:
+                defaults[key] = value
+    for key, value in defaults.items():
+        st.session_state[f"{_TUNING_PREFIX}{key}"] = value
+    st.session_state[_BACKTEST_TUNING_SEED_KEY] = True
+
+
+def _render_backtest_sidebar_window_toggle() -> str:
+    with st.sidebar:
+        st.divider()
+        st.header("Backtest Window")
+        if _BACKTEST_WINDOW_KEY not in st.session_state:
+            st.session_state[_BACKTEST_WINDOW_KEY] = _WINDOW_TUNING
+        st.radio(
+            "Window",
+            options=[_WINDOW_TUNING, _WINDOW_DASHBOARD],
+            key=_BACKTEST_WINDOW_KEY,
+            help="Switch back to parameter tuning anytime to rerun with new settings.",
+        )
+    return str(st.session_state.get(_BACKTEST_WINDOW_KEY, _WINDOW_TUNING))
+
+
+def _apply_pending_window_switch() -> None:
+    pending = st.session_state.pop(_BACKTEST_WINDOW_PENDING_KEY, None)
+    if pending in {_WINDOW_TUNING, _WINDOW_DASHBOARD}:
+        st.session_state[_BACKTEST_WINDOW_KEY] = pending
+
+
+def _snapshot_tuning_state_to_cache(run_dir: Path) -> None:
+    _ = run_dir
+    cache = st.session_state.get(_BACKTEST_TUNING_CACHE_KEY)
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state[_BACKTEST_TUNING_CACHE_KEY] = cache
+
+    snapshot: dict[str, object] = {}
+    for key in _BACKTEST_UI_DEFAULTS:
+        state_key = f"{_TUNING_PREFIX}{key}"
+        if state_key in st.session_state:
+            snapshot[key] = st.session_state[state_key]
+    if snapshot:
+        cache[_BACKTEST_TUNING_SHARED_PROFILE_KEY] = snapshot
+
+
+def _run_backtest_from_ui(run_dir: Path, dataset_path: Path) -> Path:
+    from ivdyn.backtest import BacktestConfig, run_backtest
+
+    start_date = _parse_optional_date(
+        str(st.session_state.get(f"{_TUNING_PREFIX}start_date", "")),
+        field_name="Start date",
+    )
+    end_date = _parse_optional_date(
+        str(st.session_state.get(f"{_TUNING_PREFIX}end_date", "")),
+        field_name="End date",
+    )
+    if start_date and end_date and start_date > end_date:
+        raise ValueError(f"Start date {start_date} cannot be after end date {end_date}.")
+
+    cfg = BacktestConfig(
+        run_dir=run_dir,
+        dataset_path=dataset_path,
+        start_date=start_date,
+        end_date=end_date,
+        initial_capital=float(st.session_state.get(f"{_TUNING_PREFIX}initial_capital", 10_000.0)),
+        strategy_mode=str(st.session_state.get(f"{_TUNING_PREFIX}strategy_mode", "vertical")),
+        fill_model=str(st.session_state.get(f"{_TUNING_PREFIX}fill_model", "expected")),
+        fill_gate=float(st.session_state.get(f"{_TUNING_PREFIX}fill_gate", 0.45)),
+        signal_abs_gate=float(st.session_state.get(f"{_TUNING_PREFIX}signal_abs_gate", 0.04)),
+        min_edge_to_cost_ratio=float(st.session_state.get(f"{_TUNING_PREFIX}min_edge_to_cost_ratio", 1.75)),
+        max_trades_per_day=int(st.session_state.get(f"{_TUNING_PREFIX}max_trades_per_day", 2)),
+        max_contracts_per_trade=int(st.session_state.get(f"{_TUNING_PREFIX}max_contracts_per_trade", 4)),
+        max_rel_spread=float(st.session_state.get(f"{_TUNING_PREFIX}max_rel_spread", 0.10)),
+        slippage_bps=float(st.session_state.get(f"{_TUNING_PREFIX}slippage_bps", 10.0)),
+        spread_cross_fraction=float(st.session_state.get(f"{_TUNING_PREFIX}spread_cross_fraction", 0.75)),
+        option_commission_per_contract=float(
+            st.session_state.get(f"{_TUNING_PREFIX}option_commission_per_contract", 0.65)
+        ),
+        option_fee_per_contract=float(st.session_state.get(f"{_TUNING_PREFIX}option_fee_per_contract", 0.05)),
+        hedge_underlying_delta=bool(st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_delta", True)),
+        hedge_underlying_ratio=float(st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_ratio", 0.5)),
+        hedge_underlying_min_abs_shares=float(
+            st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_min_abs_shares", 15.0)
+        ),
+        hedge_underlying_max_shares=int(st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_max_shares", 50)),
+        hedge_underlying_slippage_bps=float(
+            st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_slippage_bps", 1.0)
+        ),
+        enforce_portfolio_constraints=bool(
+            st.session_state.get(f"{_TUNING_PREFIX}enforce_portfolio_constraints", True)
+        ),
+        buying_power_leverage=float(st.session_state.get(f"{_TUNING_PREFIX}buying_power_leverage", 1.0)),
+        option_short_margin_rate=float(st.session_state.get(f"{_TUNING_PREFIX}option_short_margin_rate", 0.20)),
+        underlying_margin_rate=float(st.session_state.get(f"{_TUNING_PREFIX}underlying_margin_rate", 0.50)),
+    )
+    return run_backtest(cfg)
+
+
+def _resolve_backtest_targets(
+    *, selected_run_dir: Path, selected_dataset_path: Path | None, scope_mode: str
+) -> tuple[list[tuple[str, Path, Path]], list[str]]:
+    targets: list[tuple[str, Path, Path]] = []
+    skipped: list[str] = []
+
+    if scope_mode == "All latest stocks":
+        symbol_runs = _discover_latest_runs_by_symbol(Path("outputs"))
+        if not symbol_runs:
+            skipped.append("No symbol runs discovered in `outputs/<SYMBOL>/runs`.")
+            return targets, skipped
+
+        for symbol, run_dir in sorted(symbol_runs.items()):
+            run_ok = run_dir.exists() and run_dir.is_dir()
+            if not run_ok:
+                skipped.append(f"{symbol}: run directory missing (`{run_dir}`).")
+                continue
+
+            dataset_default = Path(_dataset_default_for_run(run_dir)).expanduser()
+            dataset_ok = dataset_default.exists() and dataset_default.is_file()
+            if not dataset_ok:
+                skipped.append(f"{symbol}: dataset missing (`{dataset_default}`).")
+                continue
+            targets.append((symbol, run_dir, dataset_default))
+        return targets, skipped
+
+    run_ok = selected_run_dir.exists() and selected_run_dir.is_dir()
+    if not run_ok:
+        skipped.append(f"Selected run directory missing (`{selected_run_dir}`).")
+        return targets, skipped
+    if selected_dataset_path is None:
+        skipped.append("Selected dataset path is empty.")
+        return targets, skipped
+    if not selected_dataset_path.exists() or not selected_dataset_path.is_file():
+        skipped.append(f"Selected dataset missing (`{selected_dataset_path}`).")
+        return targets, skipped
+
+    label = _extract_symbol_from_run_dir(selected_run_dir) or selected_run_dir.name
+    targets.append((str(label), selected_run_dir, selected_dataset_path))
+    return targets, skipped
+
+
+def _render_backtest_tuning_window(run_dir: Path, dataset_path: Path | None) -> None:
+    st.title("Backtest Parameter Tuning")
+    st.caption("Tune high-impact trade-performance parameters in UI, run backtest, then inspect results.")
+
+    run_str = str(run_dir.resolve())
+    dataset_str = str(dataset_path.resolve()) if dataset_path is not None else "n/a"
+    st.markdown(
+        (
+            "<div class='block-note'>"
+            f"<b>Run directory</b>: <code>{run_str}</code><br>"
+            f"<b>Dataset</b>: <code>{dataset_str}</code>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+    _seed_backtest_tuning_state(run_dir)
+
+    if st.button("Reset to Last Backtest Defaults", help="Discard UI edits and reload defaults from last backtest summary."):
+        summary_defaults = _backtest_summary_defaults(run_dir)
+        cache = st.session_state.get(_BACKTEST_TUNING_CACHE_KEY)
+        if isinstance(cache, dict):
+            cache[_BACKTEST_TUNING_SHARED_PROFILE_KEY] = summary_defaults
+        for key, value in summary_defaults.items():
+            st.session_state[f"{_TUNING_PREFIX}{key}"] = value
+        st.session_state[_BACKTEST_TUNING_SEED_KEY] = True
+        st.rerun()
+
+    scope_mode = st.radio(
+        "Backtest scope",
+        options=["All latest stocks", "Selected stock only"],
+        key=_BACKTEST_SCOPE_KEY,
+        horizontal=True,
+        help="All latest stocks runs each symbol's latest run using its dataset path from train summary.",
+    )
+
+    run_exists = run_dir.exists() and run_dir.is_dir()
+    dataset_exists = bool(dataset_path is not None and dataset_path.exists() and dataset_path.is_file())
+    if scope_mode == "Selected stock only":
+        if not run_exists:
+            st.error(f"Run directory does not exist: {run_dir}")
+        if dataset_path is None:
+            st.error("Dataset path is required.")
+        elif not dataset_exists:
+            if dataset_path.exists() and dataset_path.is_dir():
+                st.error(f"Dataset path points to a directory, expected `.npz` file: {dataset_path}")
+            else:
+                st.error(f"Dataset path does not exist: {dataset_path}")
+
+    targets, skipped = _resolve_backtest_targets(
+        selected_run_dir=run_dir,
+        selected_dataset_path=dataset_path,
+        scope_mode=str(scope_mode),
+    )
+    if skipped:
+        for msg in skipped:
+            st.warning(msg)
+    if targets:
+        target_rows = pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "run_dir": str(target_run.resolve()),
+                    "dataset_path": str(target_dataset.resolve()),
+                }
+                for symbol, target_run, target_dataset in targets
+            ]
+        )
+        st.caption(f"Backtest targets: {len(target_rows)}")
+        with st.expander("Target Runs", expanded=False):
+            st.dataframe(target_rows, use_container_width=True, hide_index=True)
+
+    st.subheader("Core Parameters")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.selectbox(
+        "Strategy mode",
+        options=["vertical", "single"],
+        key=f"{_TUNING_PREFIX}strategy_mode",
+        help="Vertical spreads cap tail risk; single-leg mode takes directional option risk directly.",
+    )
+    c2.selectbox(
+        "Fill model",
+        options=["expected", "assume"],
+        key=f"{_TUNING_PREFIX}fill_model",
+        help="'expected' scales results by fill probability. 'assume' is optimistic (always filled).",
+    )
+    c3.number_input(
+        "Max trades/day",
+        min_value=0,
+        max_value=50,
+        step=1,
+        key=f"{_TUNING_PREFIX}max_trades_per_day",
+        help="Primary throttle for daily risk and turnover.",
+    )
+    c4.number_input(
+        "Initial capital",
+        min_value=1_000.0,
+        max_value=100_000_000.0,
+        step=1_000.0,
+        key=f"{_TUNING_PREFIX}initial_capital",
+        help="Starting equity for the backtest.",
+    )
+
+    c5, c6, c7 = st.columns(3)
+    c5.number_input(
+        "Fill gate",
+        min_value=0.0,
+        max_value=1.0,
+        step=0.01,
+        key=f"{_TUNING_PREFIX}fill_gate",
+        help="Minimum predicted fill probability required to trade.",
+    )
+    c6.number_input(
+        "Signal |gate|",
+        min_value=0.0,
+        max_value=1.0,
+        step=0.005,
+        key=f"{_TUNING_PREFIX}signal_abs_gate",
+        help="Minimum absolute signal strength before considering a contract.",
+    )
+    c7.number_input(
+        "Min edge/cost ratio",
+        min_value=0.1,
+        max_value=10.0,
+        step=0.05,
+        key=f"{_TUNING_PREFIX}min_edge_to_cost_ratio",
+        help="Require edge to exceed estimated round-trip costs by this ratio.",
+    )
+
+    c7, c8, c9 = st.columns(3)
+    c7.number_input(
+        "Max contracts/trade",
+        min_value=1,
+        max_value=500,
+        step=1,
+        key=f"{_TUNING_PREFIX}max_contracts_per_trade",
+        help="Sizing cap per trade idea.",
+    )
+    c8.number_input(
+        "Max relative spread",
+        min_value=0.0,
+        max_value=1.0,
+        step=0.01,
+        key=f"{_TUNING_PREFIX}max_rel_spread",
+        help="Liquidity filter. Lower values force tighter markets.",
+    )
+    c9.number_input(
+        "Slippage (bps)",
+        min_value=0.0,
+        max_value=500.0,
+        step=0.5,
+        key=f"{_TUNING_PREFIX}slippage_bps",
+        help="Round-trip execution slippage model in basis points.",
+    )
+
+    c10, c11, c12 = st.columns(3)
+    c10.number_input(
+        "Spread cross fraction",
+        min_value=0.0,
+        max_value=1.0,
+        step=0.01,
+        key=f"{_TUNING_PREFIX}spread_cross_fraction",
+        help="Portion of half-spread paid on each fill.",
+    )
+    c11.number_input(
+        "Commission/contract",
+        min_value=0.0,
+        max_value=10.0,
+        step=0.01,
+        key=f"{_TUNING_PREFIX}option_commission_per_contract",
+    )
+    c12.number_input(
+        "Fee/contract",
+        min_value=0.0,
+        max_value=10.0,
+        step=0.01,
+        key=f"{_TUNING_PREFIX}option_fee_per_contract",
+    )
+
+    st.subheader("Hedge Parameters")
+    c13, c14, c15 = st.columns(3)
+    c13.checkbox(
+        "Enable underlying delta hedge",
+        key=f"{_TUNING_PREFIX}hedge_underlying_delta",
+        help="Adds daily underlying hedge against net option delta.",
+    )
+    c14.number_input(
+        "Hedge ratio",
+        min_value=0.0,
+        max_value=5.0,
+        step=0.05,
+        key=f"{_TUNING_PREFIX}hedge_underlying_ratio",
+        help="0.5 means hedge half of net option delta; 1.0 means near-full neutralization.",
+    )
+    c15.number_input(
+        "Hedge max shares",
+        min_value=1,
+        max_value=100000,
+        step=1,
+        key=f"{_TUNING_PREFIX}hedge_underlying_max_shares",
+    )
+
+    c16, c17 = st.columns(2)
+    c16.number_input(
+        "Hedge min |shares|",
+        min_value=0.0,
+        max_value=100000.0,
+        step=1.0,
+        key=f"{_TUNING_PREFIX}hedge_underlying_min_abs_shares",
+    )
+    c17.number_input(
+        "Hedge slippage (bps)",
+        min_value=0.0,
+        max_value=500.0,
+        step=0.1,
+        key=f"{_TUNING_PREFIX}hedge_underlying_slippage_bps",
+    )
+
+    st.subheader("Portfolio Constraints")
+    c20, c21, c22, c23 = st.columns(4)
+    c20.checkbox(
+        "Enforce capital limits",
+        key=f"{_TUNING_PREFIX}enforce_portfolio_constraints",
+        help="Reject option/hedge trades that exceed available buying power.",
+    )
+    c21.number_input(
+        "Buying power leverage",
+        min_value=0.0,
+        max_value=10.0,
+        step=0.05,
+        key=f"{_TUNING_PREFIX}buying_power_leverage",
+        help="Buying power = max(equity, 0) x leverage.",
+    )
+    c22.number_input(
+        "Option short margin rate",
+        min_value=0.0,
+        max_value=2.0,
+        step=0.01,
+        key=f"{_TUNING_PREFIX}option_short_margin_rate",
+        help="Per-contract short option margin proxy as fraction of spot notional.",
+    )
+    c23.number_input(
+        "Underlying margin rate",
+        min_value=0.0,
+        max_value=2.0,
+        step=0.01,
+        key=f"{_TUNING_PREFIX}underlying_margin_rate",
+        help="Hedge stock margin proxy as fraction of stock notional.",
+    )
+
+    st.subheader("Backtest Date Window (optional)")
+    c18, c19 = st.columns(2)
+    c18.text_input(
+        "Start date",
+        key=f"{_TUNING_PREFIX}start_date",
+        placeholder="YYYY-MM-DD",
+        help="Leave blank to use earliest available date.",
+    )
+    c19.text_input(
+        "End date",
+        key=f"{_TUNING_PREFIX}end_date",
+        placeholder="YYYY-MM-DD",
+        help="Leave blank to use latest available date.",
+    )
+
+    run_clicked = st.button(
+        "Run Backtest",
+        type="primary",
+        disabled=len(targets) == 0,
+        help="Runs only when run directory and dataset path are valid.",
+    )
+
+    if not run_clicked:
+        return
+
+    out_rows: list[tuple[str, Path]] = []
+    current_symbol = ""
+    try:
+        with st.spinner(f"Running backtest for {len(targets)} target(s)..."):
+            progress = st.progress(0.0)
+            for i, (symbol, target_run, target_dataset) in enumerate(targets, start=1):
+                current_symbol = symbol
+                out_dir = _run_backtest_from_ui(run_dir=target_run, dataset_path=target_dataset)
+                out_rows.append((symbol, out_dir))
+                progress.progress(float(i) / float(len(targets)))
+    except Exception as exc:
+        where = f" for `{current_symbol}`" if current_symbol else ""
+        st.error(f"Backtest failed{where}: {exc}")
+        return
+
+    if out_rows:
+        out_df = pd.DataFrame(
+            [{"symbol": symbol, "backtest_dir": str(path.resolve())} for symbol, path in out_rows]
+        )
+        st.success(f"Backtest complete for {len(out_rows)} target(s).")
+        st.dataframe(out_df, use_container_width=True, hide_index=True)
+    st.session_state[_BACKTEST_WINDOW_PENDING_KEY] = _WINDOW_DASHBOARD
+    st.rerun()
 
 
 def _read_json(path: Path) -> dict:
@@ -283,6 +830,15 @@ def _symbol_report_row(symbol: str, run_dir: Path) -> dict[str, object]:
         "total_options_pnl_gross": bt_summary.get("total_options_pnl_gross"),
         "total_options_pnl": bt_summary.get("total_options_pnl"),
         "total_hedge_pnl": bt_summary.get("total_hedge_pnl"),
+        "initial_capital": bt_summary.get("initial_capital"),
+        "enforce_portfolio_constraints": bt_summary.get("enforce_portfolio_constraints"),
+        "buying_power_leverage": bt_summary.get("buying_power_leverage"),
+        "option_short_margin_rate": bt_summary.get("option_short_margin_rate"),
+        "underlying_margin_rate": bt_summary.get("underlying_margin_rate"),
+        "capital_rejected_trades": bt_summary.get("capital_rejected_trades"),
+        "capital_rejected_hedges": bt_summary.get("capital_rejected_hedges"),
+        "buying_power_utilization_avg": bt_summary.get("buying_power_utilization_avg"),
+        "buying_power_utilization_max": bt_summary.get("buying_power_utilization_max"),
         "risk_free_rate_annual": bt_summary.get("risk_free_rate_annual"),
         "fill_gate": bt_summary.get("fill_gate"),
         "slippage_bps": bt_summary.get("slippage_bps"),
@@ -1504,6 +2060,7 @@ def _render_backtest_tab(bt_dir: Path) -> None:
     trade_flow = _build_trade_spot_volume_frame(legs)
 
     daily["date"] = pd.to_datetime(daily["date"])
+    daily = daily.sort_values("date").reset_index(drop=True)
     daily["pnl"] = pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0)
     daily["equity"] = pd.to_numeric(daily["equity"], errors="coerce").fillna(0.0)
     if "options_pnl" in daily.columns:
@@ -1522,6 +2079,50 @@ def _render_backtest_tab(bt_dir: Path) -> None:
         daily["options_pnl_gross"] = pd.to_numeric(daily["options_pnl_gross"], errors="coerce").fillna(0.0)
     else:
         daily["options_pnl_gross"] = daily["options_pnl"] + daily["fees"]
+    try:
+        buying_power_leverage = float(bt_summary.get("buying_power_leverage", 1.0))
+    except Exception:
+        buying_power_leverage = 1.0
+    buying_power_leverage = max(buying_power_leverage, 0.0)
+    initial_capital = float(bt_summary.get("initial_capital", 0.0))
+    if "equity_start" in daily.columns:
+        equity_start = pd.to_numeric(daily["equity_start"], errors="coerce")
+    else:
+        equity_start = pd.Series(np.nan, index=daily.index, dtype=float)
+    equity_start_fallback = pd.to_numeric(daily["equity"], errors="coerce").shift(1).fillna(initial_capital)
+    equity_start = equity_start.fillna(equity_start_fallback)
+
+    if "buying_power_limit" in daily.columns:
+        bp_limit_existing = pd.to_numeric(daily["buying_power_limit"], errors="coerce")
+    else:
+        bp_limit_existing = pd.Series(np.nan, index=daily.index, dtype=float)
+    bp_limit_derived = np.clip(equity_start.to_numpy(dtype=float), 0.0, None) * buying_power_leverage
+    daily["buying_power_limit"] = np.where(np.isfinite(bp_limit_existing), bp_limit_existing, bp_limit_derived)
+    daily["buying_power_limit"] = pd.to_numeric(daily["buying_power_limit"], errors="coerce").fillna(0.0)
+
+    if "buying_power_used_options" in daily.columns:
+        daily["buying_power_used_options"] = pd.to_numeric(daily["buying_power_used_options"], errors="coerce").fillna(0.0)
+    else:
+        daily["buying_power_used_options"] = 0.0
+    if "buying_power_used_hedge" in daily.columns:
+        daily["buying_power_used_hedge"] = pd.to_numeric(daily["buying_power_used_hedge"], errors="coerce").fillna(0.0)
+    else:
+        daily["buying_power_used_hedge"] = 0.0
+    if "buying_power_used_total" in daily.columns:
+        bp_used_total_existing = pd.to_numeric(daily["buying_power_used_total"], errors="coerce")
+        bp_used_total_fallback = daily["buying_power_used_options"] + daily["buying_power_used_hedge"]
+        daily["buying_power_used_total"] = bp_used_total_existing.fillna(bp_used_total_fallback)
+    else:
+        daily["buying_power_used_total"] = daily["buying_power_used_options"] + daily["buying_power_used_hedge"]
+    daily["buying_power_used_total"] = pd.to_numeric(daily["buying_power_used_total"], errors="coerce").fillna(0.0)
+    daily["buying_power_remaining"] = daily["buying_power_limit"] - daily["buying_power_used_total"]
+    if "buying_power_utilization" in daily.columns:
+        bp_util_existing = pd.to_numeric(daily["buying_power_utilization"], errors="coerce")
+        bp_util_fallback = daily["buying_power_used_total"] / daily["buying_power_limit"].replace(0.0, np.nan)
+        daily["buying_power_utilization"] = bp_util_existing.fillna(bp_util_fallback)
+    else:
+        daily["buying_power_utilization"] = daily["buying_power_used_total"] / daily["buying_power_limit"].replace(0.0, np.nan)
+    daily["buying_power_utilization"] = pd.to_numeric(daily["buying_power_utilization"], errors="coerce").fillna(0.0)
     for c in ("net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares"):
         if c in daily.columns:
             daily[c] = pd.to_numeric(daily[c], errors="coerce").fillna(0.0)
@@ -1561,6 +2162,12 @@ def _render_backtest_tab(bt_dir: Path) -> None:
     options_gross = float(bt_summary.get("total_options_pnl_gross", daily["options_pnl_gross"].sum()))
     options_net = float(bt_summary.get("total_options_pnl", daily["options_pnl"].sum()))
     fee_drag_pct = (100.0 * total_fees / abs(options_gross)) if abs(options_gross) > 1e-12 else np.nan
+    latest_bp_limit = float(daily["buying_power_limit"].iloc[-1]) if not daily.empty else np.nan
+    latest_bp_used = float(daily["buying_power_used_total"].iloc[-1]) if not daily.empty else np.nan
+    latest_bp_remaining = float(daily["buying_power_remaining"].iloc[-1]) if not daily.empty else np.nan
+    latest_bp_util_pct = (
+        100.0 * float(daily["buying_power_utilization"].iloc[-1]) if not daily.empty else np.nan
+    )
 
     with st.expander("Costs & Execution Details", expanded=False):
         ec1, ec2, ec3, ec4 = st.columns(4)
@@ -1575,13 +2182,31 @@ def _render_backtest_tab(bt_dir: Path) -> None:
         ec7.metric("Slippage (bps)", _format_num(bt_summary.get("slippage_bps"), 2))
         ec8.metric("Spread Cross Fraction", _format_num(bt_summary.get("spread_cross_fraction"), 3))
 
+        ec9, ec10, ec11, ec12 = st.columns(4)
+        ec9.metric("Buying Power Leverage", _format_num(bt_summary.get("buying_power_leverage"), 2))
+        ec10.metric("Buying Power Used", _format_num(latest_bp_used, 2))
+        ec11.metric("Remaining Buying Power", _format_num(latest_bp_remaining, 2))
+        ec12.metric("BP Utilization (Latest)", f"{_format_num(latest_bp_util_pct, 2)}%")
+
         execution_rows = [
+            ("initial_capital", bt_summary.get("initial_capital")),
             ("strategy_mode", bt_summary.get("strategy_mode")),
             ("fill_model", bt_summary.get("fill_model")),
             ("fill_gate", bt_summary.get("fill_gate")),
             ("min_edge_to_cost_ratio", bt_summary.get("min_edge_to_cost_ratio")),
             ("max_trades_per_day", bt_summary.get("max_trades_per_day")),
             ("signal_abs_gate", bt_summary.get("signal_abs_gate")),
+            ("enforce_portfolio_constraints", bt_summary.get("enforce_portfolio_constraints")),
+            ("buying_power_leverage", bt_summary.get("buying_power_leverage")),
+            ("option_short_margin_rate", bt_summary.get("option_short_margin_rate")),
+            ("underlying_margin_rate", bt_summary.get("underlying_margin_rate")),
+            ("capital_rejected_trades", bt_summary.get("capital_rejected_trades")),
+            ("capital_rejected_hedges", bt_summary.get("capital_rejected_hedges")),
+            ("buying_power_utilization_avg", bt_summary.get("buying_power_utilization_avg")),
+            ("buying_power_utilization_max", bt_summary.get("buying_power_utilization_max")),
+            ("buying_power_limit_latest", latest_bp_limit),
+            ("buying_power_used_latest", latest_bp_used),
+            ("buying_power_remaining_latest", latest_bp_remaining),
             ("risk_free_rate_annual", bt_summary.get("risk_free_rate_annual")),
         ]
         exec_df = pd.DataFrame(execution_rows, columns=["metric", "value"])
@@ -1616,6 +2241,42 @@ def _render_backtest_tab(bt_dir: Path) -> None:
             .properties(height=230, title="Daily Fees vs Net Options PnL"),
             use_container_width=True,
         )
+
+        bp_long = daily[["date", "buying_power_limit", "buying_power_used_total", "buying_power_remaining"]].melt(
+            id_vars=["date"],
+            var_name="series",
+            value_name="value",
+        )
+        bp_long["series"] = bp_long["series"].map(
+            {
+                "buying_power_limit": "Limit",
+                "buying_power_used_total": "Used",
+                "buying_power_remaining": "Remaining",
+            }
+        )
+        bp_chart = (
+            alt.Chart(bp_long)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("date:T", title="Date"),
+                y=alt.Y("value:Q", title="Buying Power"),
+                color=alt.Color(
+                    "series:N",
+                    scale=alt.Scale(
+                        domain=["Limit", "Used", "Remaining"],
+                        range=["#111827", "#b91c1c", "#0f766e"],
+                    ),
+                    title="Series",
+                ),
+                tooltip=[
+                    "date:T",
+                    alt.Tooltip("series:N", title="Series"),
+                    alt.Tooltip("value:Q", title="Value"),
+                ],
+            )
+            .properties(height=240, title="Buying Power Over Time")
+        )
+        st.altair_chart(bp_chart, use_container_width=True)
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -2305,7 +2966,15 @@ def render_dashboard(run_dir: Path) -> None:
 def main() -> None:
     st.set_page_config(page_title="IV Dynamics Dashboard", layout="wide")
     _inject_style()
+    _apply_pending_window_switch()
     run_dir = _resolve_run_dir()
+    _snapshot_tuning_state_to_cache(run_dir)
+    window = _render_backtest_sidebar_window_toggle()
+    dataset_raw = str(st.session_state.get("dataset_path", "")).strip()
+    dataset_path = Path(dataset_raw).expanduser() if dataset_raw else None
+    if window == _WINDOW_TUNING:
+        _render_backtest_tuning_window(run_dir=run_dir, dataset_path=dataset_path)
+        return
     render_dashboard(run_dir)
 
 

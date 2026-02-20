@@ -22,13 +22,16 @@ from ivdyn.finance import bs_delta
 from ivdyn.eval.metrics import probabilistic_sharpe_ratio, sample_skew_kurtosis
 
 _OPRA_TICKER_RE = re.compile(r"^O:(?P<underlying>[A-Z]+)(?P<exp>\d{6})[CP]\d{8}$")
-_BACKTEST_VERSION = "2026-02-19-rf45-no-alpha-v1"
+_BACKTEST_VERSION = "2026-02-19-rf46-sizing-v1"
 
 
 @dataclass(slots=True)
 class BacktestConfig:
     run_dir: Path
     dataset_path: Path
+    # Optional explicit output directory. If provided, artifacts are written here
+    # instead of <run_dir>/backtest so live workflows can stay isolated.
+    output_dir: Path | None = None
     # Optional inclusive date filter (YYYY-MM-DD). Useful for debugging and walk-forward.
     start_date: str | None = None
     end_date: str | None = None
@@ -51,7 +54,9 @@ class BacktestConfig:
     # Fill modeling: "assume" (legacy optimistic) or "expected" (EV scaled by fill_prob).
     fill_model: str = "expected"
     max_trades_per_day: int = 5
+    max_contracts_per_trade: int = 4
     volume_participation_rate: float = 0.02
+    open_interest_participation_rate: float = 0.01
     selector_edge_clip_quantile: float = 0.95
     selector_mid_norm_floor: float = 0.0025
     selector_signal_soft_cap: float = 250.0
@@ -103,6 +108,13 @@ class BacktestConfig:
     # - "learned": load a HedgePolicyBundle and predict a state-dependent ratio.
     hedge_policy: str = "fixed"
     hedge_policy_path: str | None = None
+
+    # Portfolio accounting constraints.
+    # These gates reject trades that exceed available buying power.
+    enforce_portfolio_constraints: bool = True
+    buying_power_leverage: float = 1.0
+    option_short_margin_rate: float = 0.20
+    underlying_margin_rate: float = 0.50
 
 
 def _clamp01(x: float) -> float:
@@ -216,6 +228,21 @@ def _underlying_pnl(
     return float(side * sh * (exit_ - entry))
 
 
+def _option_entry_price(
+    *,
+    mid_now: float,
+    rel_spread_now: float,
+    slippage: float,
+    spread_cross_fraction: float,
+    side: int,
+) -> float:
+    """Estimated option entry fill price per share used for capital checks."""
+    rel_now = float(np.clip(rel_spread_now, 0.0, 3.0))
+    cross = float(np.clip(spread_cross_fraction, 0.0, 1.0))
+    entry_cost = float(slippage + 0.5 * rel_now * cross)
+    return float(mid_now * (1.0 + side * entry_cost))
+
+
 def _interp_surface_bilinear(
     surface: np.ndarray,
     *,
@@ -317,6 +344,65 @@ def _tenor_bucket(dte: int) -> int:
     return 90
 
 
+def _quality_scaled_contracts(
+    *,
+    max_contracts_per_trade: int,
+    edge_to_cost_ratio: float,
+    fill_prob: float,
+    rel_spread: float,
+    selection_score: float,
+    top_selection_score: float,
+    min_edge_to_cost_ratio: float,
+    fill_gate: float,
+    max_rel_spread: float,
+    est_volume: float | None,
+    est_open_interest: float | None,
+    volume_participation_rate: float,
+    open_interest_participation_rate: float,
+) -> tuple[int, float, int]:
+    """Conservative contract sizing for high-conviction, liquid ideas.
+
+    Returns:
+        contracts_target: integer contracts to attempt.
+        quality_score: [0, 1] blended quality metric.
+        contracts_cap: final liquidity/config cap used for sizing.
+    """
+    cfg_cap = max(1, int(max_contracts_per_trade))
+    if cfg_cap <= 1:
+        return 1, 0.0, 1
+
+    vol_cap = cfg_cap
+    if est_volume is not None and np.isfinite(est_volume) and est_volume > 0.0:
+        vol_cap = max(1, int(np.floor(float(est_volume) * max(float(volume_participation_rate), 0.0))))
+
+    oi_cap = cfg_cap
+    if est_open_interest is not None and np.isfinite(est_open_interest) and est_open_interest > 0.0:
+        oi_cap = max(1, int(np.floor(float(est_open_interest) * max(float(open_interest_participation_rate), 0.0))))
+
+    contracts_cap = max(1, min(cfg_cap, vol_cap, oi_cap))
+    if contracts_cap <= 1:
+        return 1, 0.0, 1
+
+    edge_floor = max(float(min_edge_to_cost_ratio) + 0.75, float(min_edge_to_cost_ratio) * 1.5)
+    edge_ceiling = max(edge_floor + 1e-6, edge_floor * 2.0)
+    fill_floor = float(np.clip(max(float(fill_gate) + 0.20, 0.80), 0.0, 0.99))
+    spread_cap = max(min(float(max_rel_spread), 0.05), 1e-6)
+
+    edge_quality = float(np.clip((float(edge_to_cost_ratio) - edge_floor) / (edge_ceiling - edge_floor), 0.0, 1.0))
+    fill_quality = float(np.clip((float(fill_prob) - fill_floor) / max(1.0 - fill_floor, 1e-6), 0.0, 1.0))
+    spread_quality = float(np.clip((spread_cap - float(rel_spread)) / spread_cap, 0.0, 1.0))
+    top_score = max(float(top_selection_score), 1e-12)
+    score_quality = float(np.clip(float(selection_score) / top_score, 0.0, 1.0))
+
+    quality = edge_quality * fill_quality * spread_quality * score_quality
+    if quality < 0.55:
+        return 1, quality, contracts_cap
+
+    scaled = int(np.floor((quality**2.0) * float(contracts_cap - 1) + 1e-9))
+    contracts_target = int(np.clip(1 + scaled, 1, contracts_cap))
+    return contracts_target, quality, contracts_cap
+
+
 def _predict_contracts(
     *,
     model_bundle: ModelBundle,
@@ -398,7 +484,7 @@ def _compute_surface_latents(*, model_bundle: ModelBundle, ds: dict[str, np.ndar
 
 def run_backtest(cfg: BacktestConfig) -> Path:
     run_dir = cfg.run_dir.resolve()
-    bt_dir = run_dir / "backtest"
+    bt_dir = cfg.output_dir.resolve() if cfg.output_dir is not None else (run_dir / "backtest")
     bt_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_path = cfg.dataset_path.resolve()
@@ -447,6 +533,14 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     feature_names = ds.get("contract_feature_names", np.array([], dtype=str)).astype(str).tolist()
     fidx = {name: i for i, name in enumerate(feature_names)}
     rel_spread = features[:, fidx["rel_spread"]] if "rel_spread" in fidx else np.full(len(features), np.nan, dtype=np.float32)
+    log_volume = (
+        features[:, fidx["log_volume"]] if "log_volume" in fidx else np.full(len(features), np.nan, dtype=np.float32)
+    )
+    log_open_interest = (
+        features[:, fidx["log_open_interest"]]
+        if "log_open_interest" in fidx
+        else np.full(len(features), np.nan, dtype=np.float32)
+    )
     cp_sign = features[:, fidx["cp_sign"]] if "cp_sign" in fidx else np.where(call_put == "C", 1.0, -1.0).astype(np.float32)
     cp_sign = np.where(np.isfinite(cp_sign), np.sign(cp_sign), np.where(call_put == "C", 1.0, -1.0)).astype(np.float32)
     cp_sign = np.where(cp_sign == 0.0, np.where(call_put == "C", 1.0, -1.0), cp_sign).astype(np.float32)
@@ -626,6 +720,8 @@ def run_backtest(cfg: BacktestConfig) -> Path:
             "fill_prob": fill_prob[active].astype(float),
             "moneyness": moneyness[active].astype(float),
             "rel_spread": rel_spread[active].astype(float),
+            "log_volume": log_volume[active].astype(float),
+            "log_open_interest": log_open_interest[active].astype(float),
             "cp_sign": cp_sign[active].astype(float),
             "spot": spot[active].astype(float),
             "side": side[active].astype(str),
@@ -666,8 +762,15 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "execution_cost_per_contract",
         "execution_cost_ratio",
         "max_fill_distance",
+        "contracts_target",
         "contracts",
+        "contracts_cap",
+        "contract_quality",
         "notional",
+        "capital_required",
+        "buying_power_limit",
+        "buying_power_used_before_trade",
+        "buying_power_used_after_trade",
         "fees",
         "pnl_before_fees",
         "pnl_gross",
@@ -683,18 +786,52 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     hedge_ratio_relaxed = max(float(cfg.hedge_relaxed_net_delta_ratio), hedge_ratio)
     hedge_abs = max(float(cfg.hedge_max_net_delta_abs), 0.0)
     hedge_cp_ratio = float(np.clip(cfg.hedge_max_side_imbalance_ratio, 0.0, 1.0))
+    enforce_portfolio_constraints = bool(getattr(cfg, "enforce_portfolio_constraints", True))
+    buying_power_leverage = max(float(getattr(cfg, "buying_power_leverage", 1.0)), 0.0)
+    option_short_margin_rate = max(float(getattr(cfg, "option_short_margin_rate", 0.20)), 0.0)
+    underlying_margin_rate = max(float(getattr(cfg, "underlying_margin_rate", 0.50)), 0.0)
     contract_multiplier = 100.0
     trade_rows: list[dict[str, object]] = []
     leg_rows: list[dict[str, object]] = []
     hedge_rows: list[dict[str, object]] = []
+    capital_rows: list[dict[str, object]] = []
+    capital_rejected_trades_total = 0
+    capital_rejected_hedges_total = 0
+    running_equity = float(cfg.initial_capital)
+    if not np.isfinite(running_equity):
+        raise ValueError(f"initial_capital must be finite, got {cfg.initial_capital!r}")
     trade_id = 0
     for d in sorted(candidates["date_idx"].unique().tolist()):
         day = candidates[candidates["date_idx"] == d].reset_index(drop=True)
         if day.empty:
             continue
 
+        day_date = str(day.at[0, "date"])
+        day_date_next = str(day.at[0, "date_next"])
+        equity_start_day = float(running_equity)
+        buying_power_limit_day = float(max(equity_start_day, 0.0) * buying_power_leverage)
+        buying_power_used_options_day = 0.0
+        buying_power_used_hedge_day = 0.0
+        capital_rejected_trades_day = 0
+        capital_rejected_hedges_day = 0
+        day_options_pnl_total = 0.0
+
         day_cap = max(0, int(cfg.max_trades_per_day))
         if day_cap == 0:
+            capital_rows.append(
+                {
+                    "date": day_date,
+                    "date_next": day_date_next,
+                    "equity_start": equity_start_day,
+                    "equity_end": equity_start_day,
+                    "buying_power_limit": buying_power_limit_day,
+                    "buying_power_used_options": 0.0,
+                    "buying_power_used_hedge": 0.0,
+                    "buying_power_used_total": 0.0,
+                    "capital_rejected_trades": 0,
+                    "capital_rejected_hedges": 0,
+                }
+            )
             continue
 
         # Optional multi-leg universe (broader than the alpha-selection universe).
@@ -761,6 +898,10 @@ def run_backtest(cfg: BacktestConfig) -> Path:
             long_allowed &= ~(is_long_day & (cp_day < 0.0))
         selection_score = np.where(is_long_day, selection_score * selector_long_score_scale, selection_score)
         selection_score = np.where(long_allowed, selection_score, 0.0)
+        if np.isfinite(selection_score).any():
+            top_selection_score = float(np.nanmax(selection_score))
+        else:
+            top_selection_score = 0.0
         side_sign_day = np.where(side_day == "LONG", 1.0, -1.0)
         moneyness_day = np.clip(day["moneyness"].to_numpy(dtype=float), 0.1, 10.0)
         delta_mag = np.clip(np.exp(-25.0 * np.abs(moneyness_day - 1.0)), 0.05, 1.0)
@@ -929,6 +1070,9 @@ def run_backtest(cfg: BacktestConfig) -> Path:
             wing_symbol = ""
             wing_strike = float("nan")
             wing_side_lbl = ""
+            wing_side = 0
+            wing_mid_now = float("nan")
+            wing_rel_sp = float("nan")
             wing_signal = float("nan")
             wing_edge_usd_per_share = float("nan")
             wing_pnl_per_contract = 0.0
@@ -940,13 +1084,39 @@ def run_backtest(cfg: BacktestConfig) -> Path:
 
             fill_p = float(day.at[i, "fill_prob"])
             fill_factor = _clamp01(fill_p) if str(cfg.fill_model).lower().startswith("exp") else 1.0
+            log_volume_i = float(day.at[i, "log_volume"])
+            log_open_interest_i = float(day.at[i, "log_open_interest"])
+            est_volume_i = (
+                float(np.expm1(np.clip(log_volume_i, 0.0, 20.0))) if np.isfinite(log_volume_i) else None
+            )
+            est_oi_i = (
+                float(np.expm1(np.clip(log_open_interest_i, 0.0, 20.0)))
+                if np.isfinite(log_open_interest_i)
+                else None
+            )
+            contracts_target, contract_quality, contracts_cap = _quality_scaled_contracts(
+                max_contracts_per_trade=int(cfg.max_contracts_per_trade),
+                edge_to_cost_ratio=float(edge_to_cost[i]),
+                fill_prob=fill_p,
+                rel_spread=rel_sp_main,
+                selection_score=float(selection_score[i]),
+                top_selection_score=top_selection_score,
+                min_edge_to_cost_ratio=float(cfg.min_edge_to_cost_ratio),
+                fill_gate=float(cfg.fill_gate),
+                max_rel_spread=float(cfg.max_rel_spread),
+                est_volume=est_volume_i,
+                est_open_interest=est_oi_i,
+                volume_participation_rate=float(cfg.volume_participation_rate),
+                open_interest_participation_rate=float(cfg.open_interest_participation_rate),
+            )
+            contracts_filled = float(contracts_target) * float(fill_factor)
             fees = _option_roundtrip_fees(
-                contracts=fill_factor,
+                contracts=contracts_filled,
                 legs=legs,
                 commission_per_contract=float(cfg.option_commission_per_contract),
                 fee_per_contract=float(cfg.option_fee_per_contract),
             )
-            pnl_before_fees = float(pnl_per_contract * fill_factor)
+            pnl_before_fees = float(pnl_per_contract * contracts_filled)
             pnl_gross = pnl_before_fees
             pnl_net = float(pnl_before_fees - fees)
 
@@ -973,6 +1143,8 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                 mid_now_w = float(mid_now[wing_contract_idx])
                 mid_next_w = float(mid_next[wing_contract_idx])
                 rel_sp_w = float(rel_spread[wing_contract_idx])
+                wing_mid_now = float(mid_now_w)
+                wing_rel_sp = float(rel_sp_w)
                 if np.isfinite(mid_now_w) and np.isfinite(mid_next_w):
                     pnl_per_share_w = _leg_pnl(
                         mid_now=mid_now_w,
@@ -1000,12 +1172,12 @@ def run_backtest(cfg: BacktestConfig) -> Path:
 
                     # Update fees and net PnL for 2-leg.
                     fees = _option_roundtrip_fees(
-                        contracts=fill_factor,
+                        contracts=contracts_filled,
                         legs=legs,
                         commission_per_contract=float(cfg.option_commission_per_contract),
                         fee_per_contract=float(cfg.option_fee_per_contract),
                     )
-                    pnl_before_fees = float(pnl_per_contract * fill_factor)
+                    pnl_before_fees = float(pnl_per_contract * contracts_filled)
                     pnl_gross = pnl_before_fees
                     pnl_net = float(pnl_before_fees - fees)
                 else:
@@ -1015,6 +1187,42 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     wing_symbol = ""
                     wing_strike = float("nan")
                     wing_side_lbl = ""
+
+            def _option_leg_capital_req(side_sign: int, entry_price: float, spot_ref: float) -> float:
+                px = float(max(entry_price, 0.0))
+                entry_value = px * contract_multiplier
+                if side_sign > 0:
+                    return float(max(entry_value, 0.0))
+                short_req = float(max(spot_ref, 0.0) * contract_multiplier * option_short_margin_rate)
+                return float(max(short_req - entry_value, 0.0))
+
+            entry_main = _option_entry_price(
+                mid_now=mid_now_main,
+                rel_spread_now=rel_sp_main,
+                slippage=slippage,
+                spread_cross_fraction=float(cfg.spread_cross_fraction),
+                side=main_side,
+            )
+            capital_per_contract = _option_leg_capital_req(main_side, entry_main, spot_i)
+            if wing_side != 0 and np.isfinite(wing_mid_now):
+                entry_wing = _option_entry_price(
+                    mid_now=float(wing_mid_now),
+                    rel_spread_now=float(wing_rel_sp),
+                    slippage=slippage,
+                    spread_cross_fraction=float(cfg.spread_cross_fraction),
+                    side=int(wing_side),
+                )
+                capital_per_contract += _option_leg_capital_req(int(wing_side), entry_wing, spot_i)
+
+            capital_required = float(max(contracts_filled, 0.0) * max(capital_per_contract, 0.0))
+            buying_power_before_trade = float(buying_power_used_options_day)
+            if enforce_portfolio_constraints and (capital_required > 0.0):
+                if (buying_power_before_trade + capital_required) > (buying_power_limit_day + 1e-9):
+                    capital_rejected_trades_day += 1
+                    capital_rejected_trades_total += 1
+                    continue
+            buying_power_used_options_day = float(buying_power_before_trade + capital_required)
+            buying_power_after_trade = float(buying_power_used_options_day)
 
             # Apply fill model scaling to EV and costs too (expected fills).
             ev_per_contract = float(ev_per_contract * fill_factor)
@@ -1056,14 +1264,22 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     "execution_cost_per_contract": execution_cost_per_contract,
                     "execution_cost_ratio": execution_cost_ratio,
                     "max_fill_distance": max_fill_distance,
-                    "contracts": fill_factor,
-                    "notional": notional,
+                    "contracts_target": int(contracts_target),
+                    "contracts": float(contracts_filled),
+                    "contracts_cap": int(contracts_cap),
+                    "contract_quality": float(contract_quality),
+                    "notional": float(notional * contracts_filled),
+                    "capital_required": float(capital_required),
+                    "buying_power_limit": float(buying_power_limit_day),
+                    "buying_power_used_before_trade": float(buying_power_before_trade),
+                    "buying_power_used_after_trade": float(buying_power_after_trade),
                     "fees": fees,
                     "pnl_before_fees": pnl_before_fees,
                     "pnl_gross": pnl_gross,
                     "pnl": pnl_net,
                 }
             )
+            day_options_pnl_total += float(pnl_net)
 
             # Leg-level log (legs.parquet) for diagnostics and hedging.
             trade_key = f"{str(day.at[i, 'date'])}_{trade_id:06d}"
@@ -1079,7 +1295,7 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     "contract_idx": anchor_contract_idx,
                     "symbol": anchor_symbol,
                     "side": side_lbl,
-                    "contracts": float(fill_factor),
+                    "contracts": float(contracts_filled),
                     "call_put": cp,
                     "strike": float(day.at[i, "strike"]),
                     "dte": dte_i,
@@ -1089,12 +1305,12 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     "rel_spread": rel_sp_main,
                     "pred_next_norm": float(day.at[i, "pred_next_norm"]),
                     "signal": signal_i,
-                    "pnl": float(pnl_per_contract_main * fill_factor),
+                    "pnl": float(pnl_per_contract_main * contracts_filled),
                 }
             )
             option_leg_idx.append(anchor_contract_idx)
             option_leg_side_sign.append(float(main_side))
-            option_leg_contracts.append(float(fill_factor))
+            option_leg_contracts.append(float(contracts_filled))
 
             if wing_contract_idx is not None:
                 wing_side_sign = 1 if wing_side_lbl == "LONG" else -1
@@ -1108,7 +1324,7 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                         "contract_idx": int(wing_contract_idx),
                         "symbol": wing_symbol,
                         "side": wing_side_lbl,
-                        "contracts": float(fill_factor),
+                        "contracts": float(contracts_filled),
                         "call_put": str(call_put[wing_contract_idx]),
                         "strike": float(strike[wing_contract_idx]),
                         "dte": int(dte[wing_contract_idx]),
@@ -1118,12 +1334,12 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                         "rel_spread": float(rel_spread[wing_contract_idx]),
                         "pred_next_norm": float(pred_next_norm[wing_contract_idx]),
                         "signal": float(edge[wing_contract_idx]),
-                        "pnl": float(wing_pnl_per_contract * fill_factor),
+                        "pnl": float(wing_pnl_per_contract * contracts_filled),
                     }
                 )
                 option_leg_idx.append(int(wing_contract_idx))
                 option_leg_side_sign.append(float(wing_side_sign))
-                option_leg_contracts.append(float(fill_factor))
+                option_leg_contracts.append(float(contracts_filled))
 
         # Compute per-leg deltas / IVs (needed for the underlying delta hedge and diagnostics).
         can_interp = (
@@ -1183,6 +1399,7 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         # Optional: delta hedge with the underlying close-to-close.
         hedge_shares = 0.0
         hedge_pnl = 0.0
+        hedge_capital_required = 0.0
         if bool(cfg.hedge_underlying_delta) and option_leg_idx:
             if not can_interp:
                 warnings.warn(
@@ -1225,32 +1442,45 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                     if not np.isfinite(spot_next_d) or spot_next_d <= 0.0:
                         spot_next_d = float(spot_now_d)
 
-                    hedge_slip = float(cfg.hedge_underlying_slippage_bps) / 1e4
-                    hedge_pnl = _underlying_pnl(
-                        spot_now=spot_now_d,
-                        spot_next=spot_next_d,
-                        shares=hedge_shares,
-                        slippage=hedge_slip,
-                    )
+                    if not np.isfinite(spot_now_d) or spot_now_d <= 0.0:
+                        hedge_shares = 0.0
+                    else:
+                        hedge_capital_required = float(abs(hedge_shares) * spot_now_d * underlying_margin_rate)
+                        if enforce_portfolio_constraints and (
+                            (buying_power_used_options_day + hedge_capital_required) > (buying_power_limit_day + 1e-9)
+                        ):
+                            capital_rejected_hedges_day += 1
+                            capital_rejected_hedges_total += 1
+                            hedge_shares = 0.0
+                            hedge_capital_required = 0.0
+                        else:
+                            buying_power_used_hedge_day = float(hedge_capital_required)
+                            hedge_slip = float(cfg.hedge_underlying_slippage_bps) / 1e4
+                            hedge_pnl = _underlying_pnl(
+                                spot_now=spot_now_d,
+                                spot_next=spot_next_d,
+                                shares=hedge_shares,
+                                slippage=hedge_slip,
+                            )
 
-                    day_legs.append(
-                        {
-                            "trade_key": f"HEDGE_{str(day.at[0, 'date'])}",
-                            "date": str(day.at[0, "date"]),
-                            "date_next": str(day.at[0, "date_next"]),
-                            "instrument": "UNDERLYING",
-                            "leg_role": "DELTA_HEDGE",
-                            "contract_idx": -1,
-                            "symbol": underlying_symbol,
-                            "side": "LONG" if hedge_shares > 0 else "SHORT",
-                            "shares": float(abs(hedge_shares)),
-                            "spot_now": spot_now_d,
-                            "spot_next": spot_next_d,
-                            "pnl": float(hedge_pnl),
-                            "delta": 1.0,
-                            "delta_shares": float(hedge_shares),
-                        }
-                    )
+                            day_legs.append(
+                                {
+                                    "trade_key": f"HEDGE_{str(day.at[0, 'date'])}",
+                                    "date": str(day.at[0, "date"]),
+                                    "date_next": str(day.at[0, "date_next"]),
+                                    "instrument": "UNDERLYING",
+                                    "leg_role": "DELTA_HEDGE",
+                                    "contract_idx": -1,
+                                    "symbol": underlying_symbol,
+                                    "side": "LONG" if hedge_shares > 0 else "SHORT",
+                                    "shares": float(abs(hedge_shares)),
+                                    "spot_now": spot_now_d,
+                                    "spot_next": spot_next_d,
+                                    "pnl": float(hedge_pnl),
+                                    "delta": 1.0,
+                                    "delta_shares": float(hedge_shares),
+                                }
+                            )
 
         hedge_rows.append(
             {
@@ -1262,6 +1492,24 @@ def run_backtest(cfg: BacktestConfig) -> Path:
                 "hedge_pnl": float(hedge_pnl),
             }
         )
+
+        day_total_pnl = float(day_options_pnl_total + hedge_pnl)
+        equity_end_day = float(equity_start_day + day_total_pnl)
+        capital_rows.append(
+            {
+                "date": day_date,
+                "date_next": day_date_next,
+                "equity_start": float(equity_start_day),
+                "equity_end": float(equity_end_day),
+                "buying_power_limit": float(buying_power_limit_day),
+                "buying_power_used_options": float(buying_power_used_options_day),
+                "buying_power_used_hedge": float(buying_power_used_hedge_day),
+                "buying_power_used_total": float(buying_power_used_options_day + buying_power_used_hedge_day),
+                "capital_rejected_trades": int(capital_rejected_trades_day),
+                "capital_rejected_hedges": int(capital_rejected_hedges_day),
+            }
+        )
+        running_equity = float(equity_end_day)
 
         leg_rows.extend(day_legs)
 
@@ -1289,12 +1537,57 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         if not hedge_df.empty
         else pd.DataFrame(columns=["date", "hedge_pnl", "net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares"])
     )
+    capital_df = (
+        pd.DataFrame(capital_rows)
+        if capital_rows
+        else pd.DataFrame(
+            columns=[
+                "date",
+                "date_next",
+                "equity_start",
+                "equity_end",
+                "buying_power_limit",
+                "buying_power_used_options",
+                "buying_power_used_hedge",
+                "buying_power_used_total",
+                "capital_rejected_trades",
+                "capital_rejected_hedges",
+            ]
+        )
+    )
+    capital_by_day = (
+        capital_df.groupby("date", as_index=False).agg(
+            equity_start=("equity_start", "last"),
+            equity_end=("equity_end", "last"),
+            buying_power_limit=("buying_power_limit", "last"),
+            buying_power_used_options=("buying_power_used_options", "sum"),
+            buying_power_used_hedge=("buying_power_used_hedge", "sum"),
+            buying_power_used_total=("buying_power_used_total", "sum"),
+            capital_rejected_trades=("capital_rejected_trades", "sum"),
+            capital_rejected_hedges=("capital_rejected_hedges", "sum"),
+        )
+        if not capital_df.empty
+        else pd.DataFrame(
+            columns=[
+                "date",
+                "equity_start",
+                "equity_end",
+                "buying_power_limit",
+                "buying_power_used_options",
+                "buying_power_used_hedge",
+                "buying_power_used_total",
+                "capital_rejected_trades",
+                "capital_rejected_hedges",
+            ]
+        )
+    )
 
     if trades.empty:
         daily = all_days.copy()
         daily["options_pnl"] = 0.0
         daily["options_pnl_gross"] = 0.0
         daily["fees"] = 0.0
+        daily["contracts"] = 0.0
         daily["hedge_pnl"] = 0.0
         daily["pnl"] = 0.0
         daily["trades"] = 0
@@ -1310,6 +1603,7 @@ def run_backtest(cfg: BacktestConfig) -> Path:
             options_pnl=("pnl", "sum"),
             options_pnl_gross=("pnl_gross", "sum"),
             fees=("fees", "sum"),
+            contracts=("contracts", "sum"),
             trades=("pnl", "size"),
         )
         hedge_proxy = trades.groupby("date", as_index=False).agg(
@@ -1334,6 +1628,7 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         daily["options_pnl"] = pd.to_numeric(daily.get("options_pnl"), errors="coerce").fillna(0.0)
         daily["options_pnl_gross"] = pd.to_numeric(daily.get("options_pnl_gross"), errors="coerce").fillna(0.0)
         daily["fees"] = pd.to_numeric(daily.get("fees"), errors="coerce").fillna(0.0)
+        daily["contracts"] = pd.to_numeric(daily.get("contracts"), errors="coerce").fillna(0.0)
         daily["hedge_pnl"] = pd.to_numeric(daily.get("hedge_pnl"), errors="coerce").fillna(0.0)
         daily["pnl"] = daily["options_pnl"] + daily["hedge_pnl"]
         daily["trades"] = pd.to_numeric(daily.get("trades"), errors="coerce").fillna(0).astype(int)
@@ -1345,8 +1640,51 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         daily["hedge_shares"] = pd.to_numeric(daily.get("hedge_shares"), errors="coerce").fillna(0.0)
         daily["post_hedge_delta_shares"] = pd.to_numeric(daily.get("post_hedge_delta_shares"), errors="coerce").fillna(0.0)
 
+    daily = daily.merge(capital_by_day, on="date", how="left")
+    for col in (
+        "buying_power_used_options",
+        "buying_power_used_hedge",
+        "buying_power_used_total",
+        "capital_rejected_trades",
+        "capital_rejected_hedges",
+    ):
+        daily[col] = pd.to_numeric(daily.get(col), errors="coerce").fillna(0.0)
+
     initial_capital = float(cfg.initial_capital)
     daily["equity"] = initial_capital + pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0).cumsum()
+    equity_start_series = daily["equity"].shift(1).fillna(initial_capital).astype(float)
+    equity_end_series = daily["equity"].astype(float)
+    if "equity_start" in daily.columns:
+        eq_start_existing = pd.to_numeric(daily["equity_start"], errors="coerce")
+    else:
+        eq_start_existing = pd.Series(np.nan, index=daily.index, dtype=float)
+    if "equity_end" in daily.columns:
+        eq_end_existing = pd.to_numeric(daily["equity_end"], errors="coerce")
+    else:
+        eq_end_existing = pd.Series(np.nan, index=daily.index, dtype=float)
+    daily["equity_start"] = np.where(np.isfinite(eq_start_existing), eq_start_existing, equity_start_series)
+    daily["equity_end"] = np.where(np.isfinite(eq_end_existing), eq_end_existing, equity_end_series)
+
+    derived_bp_limit = np.clip(equity_start_series.to_numpy(dtype=float), 0.0, None) * buying_power_leverage
+    if "buying_power_limit" in daily.columns:
+        bp_existing = pd.to_numeric(daily["buying_power_limit"], errors="coerce")
+    else:
+        bp_existing = pd.Series(np.nan, index=daily.index, dtype=float)
+    daily["buying_power_limit"] = np.where(np.isfinite(bp_existing), bp_existing, derived_bp_limit)
+    daily["buying_power_limit"] = pd.to_numeric(daily["buying_power_limit"], errors="coerce").fillna(0.0)
+    daily["buying_power_used_options"] = pd.to_numeric(daily.get("buying_power_used_options"), errors="coerce").fillna(0.0)
+    daily["buying_power_used_hedge"] = pd.to_numeric(daily.get("buying_power_used_hedge"), errors="coerce").fillna(0.0)
+    daily["buying_power_used_total"] = pd.to_numeric(daily.get("buying_power_used_total"), errors="coerce").fillna(0.0)
+    daily["capital_rejected_trades"] = (
+        pd.to_numeric(daily.get("capital_rejected_trades"), errors="coerce").fillna(0.0).astype(int)
+    )
+    daily["capital_rejected_hedges"] = (
+        pd.to_numeric(daily.get("capital_rejected_hedges"), errors="coerce").fillna(0.0).astype(int)
+    )
+    daily["buying_power_utilization"] = (
+        pd.to_numeric(daily["buying_power_used_total"], errors="coerce")
+        / pd.to_numeric(daily["buying_power_limit"], errors="coerce").replace(0.0, np.nan)
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     pnl = daily["pnl"].astype(float)
     equity = daily["equity"].astype(float)
@@ -1386,6 +1724,10 @@ def run_backtest(cfg: BacktestConfig) -> Path:
     )
 
     total_pnl = float(pnl.sum())
+    capital_rejected_trades_sum = int(pd.to_numeric(daily.get("capital_rejected_trades"), errors="coerce").fillna(0.0).sum())
+    capital_rejected_hedges_sum = int(pd.to_numeric(daily.get("capital_rejected_hedges"), errors="coerce").fillna(0.0).sum())
+    bp_util = pd.to_numeric(daily.get("buying_power_utilization"), errors="coerce").fillna(0.0)
+    bp_used = pd.to_numeric(daily.get("buying_power_used_total"), errors="coerce").fillna(0.0)
     summary = {
         "backtest_version": _BACKTEST_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1418,10 +1760,25 @@ def run_backtest(cfg: BacktestConfig) -> Path:
         "max_drawdown": max_drawdown,
         "max_drawdown_abs": max_drawdown_abs,
         "win_rate": float((pnl > 0).mean()) if len(pnl) else 0.0,
+        "enforce_portfolio_constraints": bool(enforce_portfolio_constraints),
+        "buying_power_leverage": float(buying_power_leverage),
+        "option_short_margin_rate": float(option_short_margin_rate),
+        "underlying_margin_rate": float(underlying_margin_rate),
+        "capital_rejected_trades": int(capital_rejected_trades_sum),
+        "capital_rejected_hedges": int(capital_rejected_hedges_sum),
+        "capital_rejected_trades_loop_count": int(capital_rejected_trades_total),
+        "capital_rejected_hedges_loop_count": int(capital_rejected_hedges_total),
+        "buying_power_utilization_avg": float(bp_util.mean()) if len(bp_util) else 0.0,
+        "buying_power_utilization_max": float(bp_util.max()) if len(bp_util) else 0.0,
+        "buying_power_used_avg": float(bp_used.mean()) if len(bp_used) else 0.0,
+        "buying_power_used_max": float(bp_used.max()) if len(bp_used) else 0.0,
         "fill_gate": float(cfg.fill_gate),
         "fill_model": str(cfg.fill_model),
         "max_trades_per_day": int(cfg.max_trades_per_day),
+        "max_contracts_per_trade": int(cfg.max_contracts_per_trade),
+        "total_contracts": float(pd.to_numeric(trades.get("contracts"), errors="coerce").fillna(0.0).sum()),
         "volume_participation_rate": float(cfg.volume_participation_rate),
+        "open_interest_participation_rate": float(cfg.open_interest_participation_rate),
         "spread_cross_fraction": float(cfg.spread_cross_fraction),
         "option_commission_per_contract": float(cfg.option_commission_per_contract),
         "option_fee_per_contract": float(cfg.option_fee_per_contract),

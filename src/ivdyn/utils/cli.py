@@ -180,7 +180,9 @@ def _backtest_command(ns: Any) -> None:
             option_fee_per_contract=getattr(ns, "option_fee_per_contract", 0.05),
             min_edge_to_cost_ratio=getattr(ns, "min_edge_to_cost_ratio", 1.2),
             max_trades_per_day=ns.max_trades_per_day,
+            max_contracts_per_trade=getattr(ns, "max_contracts_per_trade", 4),
             volume_participation_rate=getattr(ns, "volume_participation_rate", 0.01),
+            open_interest_participation_rate=getattr(ns, "open_interest_participation_rate", 0.01),
             selector_long_score_scale=getattr(ns, "long_score_scale", 0.0),
             selector_allow_long_puts=bool(getattr(ns, "allow_long_puts", True)),
             signal_abs_gate=ns.signal_abs_gate,
@@ -207,6 +209,10 @@ def _backtest_command(ns: Any) -> None:
             hedge_underlying_slippage_bps=getattr(ns, "hedge_underlying_slippage_bps", 1.0),
             hedge_policy=getattr(ns, "hedge_policy", "fixed"),
             hedge_policy_path=getattr(ns, "hedge_policy_path", None),
+            enforce_portfolio_constraints=bool(getattr(ns, "enforce_portfolio_constraints", True)),
+            buying_power_leverage=getattr(ns, "buying_power_leverage", 1.0),
+            option_short_margin_rate=getattr(ns, "option_short_margin_rate", 0.20),
+            underlying_margin_rate=getattr(ns, "underlying_margin_rate", 0.50),
         )
     )
     print(out_dir)
@@ -254,6 +260,54 @@ def _ui_command(ns: Any) -> None:
     cmd = [sys.executable, "-m", "streamlit", "run", str(app_path)]
     rc = subprocess.call(cmd, env=env)
     raise SystemExit(rc)
+
+
+def _ui2_command(ns: Any) -> None:
+    env = os.environ.copy()
+    if getattr(ns, "symbol", None):
+        env["IVDYN_LIVE_DEFAULT_SYMBOL"] = str(ns.symbol).upper().strip()
+    app_path = Path(__file__).resolve().parent.parent / "ui" / "live_app.py"
+    cmd = [sys.executable, "-m", "streamlit", "run", str(app_path)]
+    rc = subprocess.call(cmd, env=env)
+    raise SystemExit(rc)
+
+
+def _wf_command(ns: Any) -> None:
+    from ivdyn.live import maybe_run_live_walkforward
+
+    def _log(msg: str) -> None:
+        print(msg, file=sys.stderr)
+
+    prev_symbols = os.environ.get("IVDYN_LIVE_SYMBOLS")
+    prev_force = os.environ.get("IVDYN_LIVE_FORCE_RUN")
+    try:
+        if getattr(ns, "symbol", None):
+            os.environ["IVDYN_LIVE_SYMBOLS"] = str(ns.symbol).upper().strip()
+        if bool(getattr(ns, "force", False)):
+            os.environ["IVDYN_LIVE_FORCE_RUN"] = "1"
+
+        results = maybe_run_live_walkforward(ns, logger=_log)
+    finally:
+        if prev_symbols is None:
+            os.environ.pop("IVDYN_LIVE_SYMBOLS", None)
+        else:
+            os.environ["IVDYN_LIVE_SYMBOLS"] = prev_symbols
+        if prev_force is None:
+            os.environ.pop("IVDYN_LIVE_FORCE_RUN", None)
+        else:
+            os.environ["IVDYN_LIVE_FORCE_RUN"] = prev_force
+
+    if not results:
+        print("No symbols resolved for walk-forward run.")
+        return
+
+    failed = 0
+    for row in results:
+        print(f"{row.symbol}\t{row.status}\t{row.message}")
+        if row.status == "failed":
+            failed += 1
+    if failed > 0:
+        raise SystemExit(1)
 
 
 def _resolve_massive_api_key(explicit: str | None) -> str:
@@ -913,7 +967,7 @@ def _build_parser() -> ArgumentParser:
     p.add_argument("--device", default=None)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--inference-batch-size", type=int, default=65536)
-    p.add_argument("--initial-capital", type=float, default=10000.0)
+    p.add_argument("--initial-capital", type=float, default=1000000.0)
     p.add_argument("--fill-gate", type=float, default=0.45)
     p.add_argument(
         "--fill-model",
@@ -943,6 +997,12 @@ def _build_parser() -> ArgumentParser:
         help="Target fraction of per-contract daily volume used as a participation cap.",
     )
     p.add_argument(
+        "--open-interest-participation-rate",
+        type=float,
+        default=0.01,
+        help="Target fraction of open interest used as an additional cap for contract sizing.",
+    )
+    p.add_argument(
         "--long-score-scale",
         type=float,
         default=1.0,
@@ -961,7 +1021,13 @@ def _build_parser() -> ArgumentParser:
         help="Disable LONG put candidates in the selector.",
     )
     p.set_defaults(allow_long_puts=True)
-    p.add_argument("--max-trades-per-day", type=int, default=2)
+    p.add_argument("--max-trades-per-day", type=int, default=100)
+    p.add_argument(
+        "--max-contracts-per-trade",
+        type=int,
+        default=4,
+        help="Maximum contracts for a single trade idea. Additional size is only used for very high-quality/liquid setups.",
+    )
     p.add_argument(
         "--signal-abs-gate",
         type=float,
@@ -987,8 +1053,8 @@ def _build_parser() -> ArgumentParser:
     p.add_argument("--vertical-wing-max-premium-ratio", type=float, default=0.35, help="Require wing mid_now <= ratio * anchor mid_now.")
     p.add_argument("--vertical-wing-fill-gate", type=float, default=0.6)
     p.add_argument("--vertical-wing-max-rel-spread", type=float, default=0.15)
-    p.add_argument("--vertical-wing-min-moneyness", type=float, default=0.75)
-    p.add_argument("--vertical-wing-max-moneyness", type=float, default=1.30)
+    p.add_argument("--vertical-wing-min-moneyness", type=float, default=0.3)
+    p.add_argument("--vertical-wing-max-moneyness", type=float, default=1.9)
     p.add_argument("--vertical-wing-rich-signal-penalty", type=float, default=0.75, help="Penalize long wings that are also 'rich' per the model (higher = avoid paying away alpha).")
     p.add_argument(
         "--vertical-skip-if-no-wing",
@@ -1017,9 +1083,9 @@ def _build_parser() -> ArgumentParser:
         help="Disable daily underlying delta hedge.",
     )
     p.set_defaults(hedge_underlying_delta=True)
-    p.add_argument("--hedge-underlying-ratio", type=float, default=0.1, help="0=off. 1.0=full delta neutralization; 0.5=half hedge.")
+    p.add_argument("--hedge-underlying-ratio", type=float, default=1.0, help="0=off. 1.0=full delta neutralization; 0.5=half hedge.")
     p.add_argument("--hedge-underlying-min-abs-shares", type=float, default=15.0, help="Do not place a hedge trade unless |shares| exceeds this threshold.")
-    p.add_argument("--hedge-underlying-max-shares", type=int, deivfault=50)
+    p.add_argument("--hedge-underlying-max-shares", type=int, default=50)
     p.add_argument("--hedge-underlying-slippage-bps", type=float, default=1.0)
     p.add_argument(
         "--hedge-policy",
@@ -1031,6 +1097,37 @@ def _build_parser() -> ArgumentParser:
         "--hedge-policy-path",
         default=None,
         help="Path to a trained hedge_policy.pt (required when --hedge-policy learned).",
+    )
+    p.add_argument(
+        "--enforce-portfolio-constraints",
+        dest="enforce_portfolio_constraints",
+        action="store_true",
+        help="Reject trades/hedges that exceed available buying power.",
+    )
+    p.add_argument(
+        "--no-enforce-portfolio-constraints",
+        dest="enforce_portfolio_constraints",
+        action="store_false",
+        help="Disable buying power checks (legacy behavior).",
+    )
+    p.set_defaults(enforce_portfolio_constraints=True)
+    p.add_argument(
+        "--buying-power-leverage",
+        type=float,
+        default=1.0,
+        help="Buying power multiplier on equity for funding checks.",
+    )
+    p.add_argument(
+        "--option-short-margin-rate",
+        type=float,
+        default=0.20,
+        help="Short option margin proxy as fraction of spot notional.",
+    )
+    p.add_argument(
+        "--underlying-margin-rate",
+        type=float,
+        default=0.50,
+        help="Underlying hedge margin proxy as fraction of stock notional.",
     )
     p.set_defaults(func=_backtest_command)
 
@@ -1061,6 +1158,15 @@ def _build_parser() -> ArgumentParser:
     p = sub.add_parser("ui")
     p.add_argument("--run-dir", default=None)
     p.set_defaults(func=_ui_command)
+
+    p = sub.add_parser("ui2")
+    p.add_argument("--symbol", default=None, help="Optional symbol focus for live walk-forward dashboard.")
+    p.set_defaults(func=_ui2_command)
+
+    p = sub.add_parser("wf")
+    p.add_argument("--symbol", default=None, help="Optional symbol override for live walk-forward run.")
+    p.add_argument("--force", action="store_true", default=False, help="Force a rerun even if already processed today.")
+    p.set_defaults(func=_wf_command)
 
     p = sub.add_parser("pull-underlying-massive")
     p.add_argument("--data-root", default="data")

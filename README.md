@@ -269,6 +269,40 @@ If `--run-dir` is omitted, UI defaults to `outputs/runs/latest.txt` unless `IVDY
 
 UI app: `src/ivdyn/ui/app.py`
 
+### Live walk-forward (`ui2`)
+
+Run live walk-forward explicitly with a short command:
+
+```bash
+ivdyn wf --symbol SPY
+```
+
+This command:
+
+- infers a target symbol (from `--symbol` or latest run; override with `IVDYN_LIVE_SYMBOLS`)
+- checks whether today's options/underlying data exists under `data/symbols/<SYMBOL>/...`
+- attempts a Massive pull for missing files
+- builds/refreshes a live dataset
+- runs a short walk-forward backtest window and writes results to:
+  - `outputs/live_walkforward/<SYMBOL>/sessions/wf_<TIMESTAMP>/backtest/...`
+  - `outputs/live_walkforward/<SYMBOL>/history.csv`
+
+This keeps live records separate from normal run backtests (`<run_dir>/backtest`).
+
+Launch the dedicated live dashboard:
+
+```bash
+ivdyn ui2 --symbol SPY
+```
+
+UI2 app: `src/ivdyn/ui/live_app.py`
+
+Useful env switches:
+
+- `IVDYN_LIVE_FORCE_RUN=1` to rerun even when today is already processed
+- `IVDYN_LIVE_SYMBOLS=SPY,QQQ` to force symbols processed each run
+- `IVDYN_LIVE_OUTPUT_ROOT=outputs/live_walkforward` to relocate live artifacts
+
 Key features:
 - Sidebar run source selector:
   - `Latest by stock` (auto-discovers latest run under `outputs/<SYMBOL>/runs`)
