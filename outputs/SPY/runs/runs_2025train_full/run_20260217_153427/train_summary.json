@@ -1,6 +1,0 @@
-{
-  "model_path": "outputs/runs_2025train_full/run_20260217_153427/model.pt",
-  "dataset_path": "/Users/abelobsenz/fin_project copy/outputs/dataset_test_2025_full/dataset.npz",
-  "device": "mps",
-  "final_val_recon": 0.10177241265773773
-}

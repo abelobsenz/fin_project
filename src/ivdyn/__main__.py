@@ -1,4 +1,4 @@
-from ivdyn.cli import main
+from ivdyn.utils.cli import main
 
 if __name__ == "__main__":
     main()

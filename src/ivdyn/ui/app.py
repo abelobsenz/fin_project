@@ -1,65 +1,37 @@
-"""Streamlit dashboard for model performance evidence."""
+"""Streamlit dashboard focused on training and evaluation workflows."""
 
 from __future__ import annotations
 
-from datetime import date
-from io import BytesIO
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import time
+from typing import Any
 
 import altair as alt
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-
-    PLOTLY_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency guard
-    px = None  # type: ignore[assignment]
-    go = None  # type: ignore[assignment]
-    PLOTLY_AVAILABLE = False
+OPENAI_MODEL = "gpt-5"
+RUN_REPORTS_KEY = "_te_run_reports"
+ACTIVE_RUN_KEY = "_te_active_run_dir"
 
 
-_WINDOW_TUNING = "Parameter Tuning"
-_WINDOW_DASHBOARD = "Dashboard"
-_BACKTEST_WINDOW_KEY = "backtest_ui_window"
-_BACKTEST_WINDOW_PENDING_KEY = "_backtest_ui_window_pending"
-_BACKTEST_SCOPE_KEY = "backtest_scope_mode"
-_BACKTEST_TUNING_SEED_KEY = "_backtest_tuning_initialized"
-_BACKTEST_TUNING_CACHE_KEY = "_backtest_tuning_cache"
-_BACKTEST_TUNING_SHARED_PROFILE_KEY = "_shared"
-_DATASET_SEED_KEY = "_dataset_seed_run"
-_TUNING_PREFIX = "bt_param_"
-_BACKTEST_UI_DEFAULTS: dict[str, object] = {
-    "start_date": "",
-    "end_date": "",
-    "initial_capital": 10_000.0,
-    "strategy_mode": "vertical",
-    "fill_model": "expected",
-    "fill_gate": 0.45,
-    "signal_abs_gate": 0.06,
-    "min_edge_to_cost_ratio": 2.50,
-    "max_trades_per_day": 2,
-    "max_contracts_per_trade": 1,
-    "max_rel_spread": 0.50,
-    "slippage_bps": 10.0,
-    "spread_cross_fraction": 0.75,
-    "option_commission_per_contract": 0.65,
-    "option_fee_per_contract": 0.05,
-    "hedge_underlying_delta": True,
-    "hedge_underlying_ratio": 1.0,
-    "hedge_underlying_min_abs_shares": 15.0,
-    "hedge_underlying_max_shares": 50,
-    "hedge_underlying_slippage_bps": 1.0,
-    "enforce_portfolio_constraints": True,
-    "buying_power_leverage": 1.0,
-    "option_short_margin_rate": 0.20,
-    "underlying_margin_rate": 0.50,
-}
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
 
 
 def _inject_style() -> None:
@@ -67,66 +39,139 @@ def _inject_style() -> None:
         """
 <style>
 :root {
-  --bg0: #f2f7f4;
-  --bg1: #dbe8df;
-  --panel: #f9fbfa;
-  --ink: #16231d;
-  --accent: #0f766e;
-  --accent2: #6b8f2a;
-  --muted: #5c6b63;
+  --bg0: #f4f7f3;
+  --panel: #fbfdf9;
+  --ink: #1d2a23;
+  --accent: #14532d;
+  --line: #dbe4dc;
 }
 
 .stApp {
-  font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
   background:
-    radial-gradient(1200px 500px at 0% -10%, #dff1e5 0%, rgba(223,241,229,0.2) 60%, transparent 100%),
-    radial-gradient(1000px 400px at 100% 0%, #e2f0f2 0%, rgba(226,240,242,0.1) 55%, transparent 100%),
-    linear-gradient(180deg, var(--bg0) 0%, #eff5f1 100%);
+    radial-gradient(1100px 500px at -10% -20%, #dff3e4 0%, rgba(223,243,228,0.15) 60%, transparent 100%),
+    radial-gradient(900px 380px at 110% -10%, #e4efe9 0%, rgba(228,239,233,0.10) 55%, transparent 100%),
+    linear-gradient(180deg, var(--bg0) 0%, #eef3ef 100%);
   color: var(--ink);
 }
 
-h1, h2, h3 {
-  color: var(--ink);
-  letter-spacing: -0.02em;
+div[data-testid="stMetric"] {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 6px 10px;
 }
 
 .block-note {
   border-left: 4px solid var(--accent);
-  background: #f6fbf8;
+  background: #f2f8f3;
   border-radius: 10px;
   padding: 10px 12px;
-}
-
-.console-hero {
-  border: 1px solid #d7e4dc;
-  border-radius: 14px;
-  background: linear-gradient(160deg, #f8fcfa 0%, #eef5f1 100%);
-  padding: 12px 14px;
-  margin-bottom: 0.5rem;
-  box-shadow: 0 5px 18px rgba(15, 23, 42, 0.04);
-}
-
-.console-hero .title {
-  font-weight: 700;
-  color: #10271e;
-  margin-bottom: 4px;
-}
-
-.console-hero .meta {
-  font-size: 0.92rem;
-  color: #43574e;
-}
-
-div[data-testid="stMetric"] {
-  border: 1px solid #d7e4dc;
-  border-radius: 12px;
-  background: #fbfdfb;
-  padding: 8px 10px;
 }
 </style>
 """,
         unsafe_allow_html=True,
     )
+
+
+def _load_dotenv() -> None:
+    """Best-effort .env loader for direct `streamlit run` usage."""
+    repo_root = Path(__file__).resolve().parents[3]
+    candidates = [Path.cwd() / ".env", repo_root / ".env"]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        p = candidate.resolve()
+        if p in seen or not p.exists() or not p.is_file():
+            continue
+        seen.add(p)
+
+        for raw_line in p.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                q = value[0]
+                value = value[1:-1]
+                if q == '"':
+                    value = value.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t")
+            else:
+                comment_pos = value.find(" #")
+                if comment_pos >= 0:
+                    value = value[:comment_pos].rstrip()
+            os.environ.setdefault(key, value)
+
+
+def _ensure_state() -> None:
+    if RUN_REPORTS_KEY not in st.session_state:
+        st.session_state[RUN_REPORTS_KEY] = []
+    if ACTIVE_RUN_KEY not in st.session_state:
+        st.session_state[ACTIVE_RUN_KEY] = ""
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _read_parquet_or_csv(path: Path) -> pd.DataFrame:
+    if path.exists():
+        return pd.read_parquet(path)
+    csv_path = path.with_suffix(".csv")
+    if csv_path.exists():
+        return pd.read_csv(csv_path)
+    return pd.DataFrame()
+
+
+def _format_value(v: Any, digits: int = 4) -> str:
+    if v is None:
+        return "n/a"
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, str):
+        return v
+    try:
+        x = float(v)
+    except Exception:
+        return str(v)
+    if not np.isfinite(x):
+        return "n/a"
+    return f"{x:.{digits}f}"
+
+
+def _discover_run_dirs(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for run_dir in root.glob("**/run_*"):
+        if not run_dir.is_dir():
+            continue
+        p = run_dir.resolve()
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    out.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+    return out
 
 
 def _extract_symbol_from_run_dir(run_dir: Path) -> str | None:
@@ -135,36 +180,22 @@ def _extract_symbol_from_run_dir(run_dir: Path) -> str | None:
         if part == "outputs" and i + 2 < len(parts) and parts[i + 2] == "runs":
             symbol = parts[i + 1].strip().upper()
             return symbol or None
-    train_summary = run_dir / "train_summary.json"
-    if train_summary.exists():
-        try:
-            payload = json.loads(train_summary.read_text(encoding="utf-8"))
-            symbol = str(payload.get("underlying_symbol", "")).strip().upper()
-            return symbol or None
-        except Exception:
-            return None
     return None
 
 
-def _discover_latest_runs_by_symbol(outputs_root: Path) -> dict[str, Path]:
-    def _run_recency(run_dir: Path) -> float:
-        # Prefer artifact freshness (backtest/eval/train updates) over run-dir creation time.
-        recency = run_dir.stat().st_mtime
-        for rel in (
-            "backtest/summary.json",
-            "backtest/daily.parquet",
-            "backtest/daily.csv",
-            "evaluation/metrics.json",
-            "train_summary.json",
-        ):
-            p = run_dir / rel
-            if p.exists():
-                try:
-                    recency = max(recency, p.stat().st_mtime)
-                except Exception:
-                    continue
-        return float(recency)
+def _run_recency(run_dir: Path) -> float:
+    recency = run_dir.stat().st_mtime if run_dir.exists() else 0.0
+    for rel in ("evaluation/metrics.json", "train_summary.json", "train_history.csv", "model.pt"):
+        p = run_dir / rel
+        if p.exists():
+            try:
+                recency = max(recency, p.stat().st_mtime)
+            except Exception:
+                continue
+    return float(recency)
 
+
+def _discover_latest_runs_by_symbol(outputs_root: Path) -> dict[str, Path]:
     by_symbol: dict[str, Path] = {}
     if not outputs_root.exists():
         return by_symbol
@@ -176,14 +207,27 @@ def _discover_latest_runs_by_symbol(outputs_root: Path) -> dict[str, Path]:
         if not runs_root.is_dir():
             continue
 
-        candidates: list[Path] = [p for p in runs_root.glob("**/run_*") if p.is_dir()]
+        candidates: list[Path] = []
+        seen: set[Path] = set()
+
+        for p in runs_root.glob("**/run_*"):
+            if not p.is_dir():
+                continue
+            rp = p.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            candidates.append(rp)
+
         for latest_path in runs_root.glob("**/latest.txt"):
             try:
                 target = Path(latest_path.read_text(encoding="utf-8").strip()).expanduser().resolve()
             except Exception:
                 continue
-            if target.is_dir():
-                candidates.append(target)
+            if not target.is_dir() or target in seen:
+                continue
+            seen.add(target)
+            candidates.append(target)
 
         if not candidates:
             continue
@@ -197,2785 +241,634 @@ def _discover_latest_runs_by_symbol(outputs_root: Path) -> dict[str, Path]:
     return by_symbol
 
 
-def _resolve_run_dir() -> Path:
-    default_base = Path("outputs/runs")
-    latest_file = default_base / "latest.txt"
-    env_default = os.environ.get("IVDYN_DEFAULT_RUN_DIR", "").strip()
-    if env_default:
-        default = str(Path(env_default).expanduser())
-    else:
-        default = latest_file.read_text(encoding="utf-8").strip() if latest_file.exists() else ""
-    outputs_root = Path("outputs")
-    symbol_latest = _discover_latest_runs_by_symbol(outputs_root)
-    symbols = sorted(symbol_latest)
-
-    default_symbol = _extract_symbol_from_run_dir(Path(default)) if default else None
-    if default_symbol not in symbol_latest:
-        default_symbol = symbols[0] if symbols else None
-
-    with st.sidebar:
-        st.header("Run Selection")
-        run_source = "Manual run directory"
-        if symbols:
-            run_source_choices = ["Latest by stock", "Manual run directory"]
-            default_source_idx = 1 if env_default else 0
-            run_source = st.radio("Run source", options=run_source_choices, index=default_source_idx)
-
-            default_idx = symbols.index(default_symbol) if default_symbol in symbols else 0
-            selected_symbol = st.selectbox("Stock (latest run)", options=symbols, index=default_idx)
-            latest_run = symbol_latest[selected_symbol]
-            st.caption(f"Most recent run for {selected_symbol}: `{latest_run}`")
-        else:
-            latest_run = None
-
-        if run_source == "Latest by stock" and latest_run is not None:
-            run_dir_str = str(latest_run)
-            st.text_input("Resolved run directory", value=run_dir_str, disabled=True, key="resolved_run_dir")
-        else:
-            manual_default = default
-            if not manual_default and latest_run is not None:
-                manual_default = str(latest_run)
-            run_dir_str = st.text_input("Run directory", value=manual_default, key="manual_run_dir")
-
-    run_dir = Path(run_dir_str).expanduser()
-    run_key = str(run_dir.resolve())
-    dataset_default = _dataset_default_for_run(run_dir)
-    if st.session_state.get(_DATASET_SEED_KEY) != run_key:
-        st.session_state["dataset_path"] = dataset_default
-        st.session_state[_DATASET_SEED_KEY] = run_key
-
-    with st.sidebar:
-        st.text_input("Dataset path", key="dataset_path")
-
-    return run_dir
-
-
-def _dataset_default_for_run(run_dir: Path) -> str:
-    train_summary = run_dir / "train_summary.json"
-    if train_summary.exists():
-        try:
-            payload = json.loads(train_summary.read_text(encoding="utf-8"))
-            raw = str(payload.get("dataset_path", "")).strip()
-            if raw:
-                return str(Path(raw).expanduser())
-        except Exception:
-            pass
-    return "outputs/datasets/dataset/dataset.npz"
-
-
-def _parse_optional_date(raw: str, *, field_name: str) -> str | None:
-    txt = str(raw or "").strip()
-    if not txt:
-        return None
-    try:
-        return date.fromisoformat(txt).isoformat()
-    except Exception as exc:
-        raise ValueError(f"{field_name} must be YYYY-MM-DD (example: 2025-06-15).") from exc
-
-
-def _backtest_summary_defaults(run_dir: Path) -> dict[str, object]:
-    defaults = dict(_BACKTEST_UI_DEFAULTS)
-    summary = _read_json(run_dir / "backtest" / "summary.json")
-    for key in defaults:
-        if key in {"start_date", "end_date"}:
-            raw = summary.get(key)
-            defaults[key] = str(raw).strip() if raw else ""
-            continue
-        raw = summary.get(key)
-        if raw is not None:
-            defaults[key] = raw
-    return defaults
-
-
-def _seed_backtest_tuning_state(run_dir: Path) -> None:
-    _ = run_dir
-    cache = st.session_state.get(_BACKTEST_TUNING_CACHE_KEY)
-    if not isinstance(cache, dict):
-        cache = {}
-    st.session_state[_BACKTEST_TUNING_CACHE_KEY] = cache
-
-    shared_profile = (
-        cache.get(_BACKTEST_TUNING_SHARED_PROFILE_KEY)
-        if isinstance(cache.get(_BACKTEST_TUNING_SHARED_PROFILE_KEY), dict)
-        else None
-    )
-    if bool(st.session_state.get(_BACKTEST_TUNING_SEED_KEY, False)):
-        for key, default_value in _BACKTEST_UI_DEFAULTS.items():
-            state_key = f"{_TUNING_PREFIX}{key}"
-            if state_key not in st.session_state:
-                if shared_profile is not None and key in shared_profile:
-                    st.session_state[state_key] = shared_profile[key]
-                else:
-                    st.session_state[state_key] = default_value
-        return
-
-    defaults = dict(_BACKTEST_UI_DEFAULTS)
-    if shared_profile is not None:
-        for key, value in shared_profile.items():
-            if key in defaults:
-                defaults[key] = value
-    for key, value in defaults.items():
-        st.session_state[f"{_TUNING_PREFIX}{key}"] = value
-    st.session_state[_BACKTEST_TUNING_SEED_KEY] = True
-
-
-def _render_backtest_sidebar_window_toggle() -> str:
-    with st.sidebar:
-        st.divider()
-        st.header("Backtest Window")
-        if _BACKTEST_WINDOW_KEY not in st.session_state:
-            st.session_state[_BACKTEST_WINDOW_KEY] = _WINDOW_TUNING
-        st.radio(
-            "Window",
-            options=[_WINDOW_TUNING, _WINDOW_DASHBOARD],
-            key=_BACKTEST_WINDOW_KEY,
-            help="Switch back to parameter tuning anytime to rerun with new settings.",
-        )
-    return str(st.session_state.get(_BACKTEST_WINDOW_KEY, _WINDOW_TUNING))
-
-
-def _apply_pending_window_switch() -> None:
-    pending = st.session_state.pop(_BACKTEST_WINDOW_PENDING_KEY, None)
-    if pending in {_WINDOW_TUNING, _WINDOW_DASHBOARD}:
-        st.session_state[_BACKTEST_WINDOW_KEY] = pending
-
-
-def _snapshot_tuning_state_to_cache(run_dir: Path) -> None:
-    _ = run_dir
-    cache = st.session_state.get(_BACKTEST_TUNING_CACHE_KEY)
-    if not isinstance(cache, dict):
-        cache = {}
-        st.session_state[_BACKTEST_TUNING_CACHE_KEY] = cache
-
-    snapshot: dict[str, object] = {}
-    for key in _BACKTEST_UI_DEFAULTS:
-        state_key = f"{_TUNING_PREFIX}{key}"
-        if state_key in st.session_state:
-            snapshot[key] = st.session_state[state_key]
-    if snapshot:
-        cache[_BACKTEST_TUNING_SHARED_PROFILE_KEY] = snapshot
-
-
-def _run_backtest_from_ui(run_dir: Path, dataset_path: Path) -> Path:
-    from ivdyn.backtest import BacktestConfig, run_backtest
-
-    start_date = _parse_optional_date(
-        str(st.session_state.get(f"{_TUNING_PREFIX}start_date", "")),
-        field_name="Start date",
-    )
-    end_date = _parse_optional_date(
-        str(st.session_state.get(f"{_TUNING_PREFIX}end_date", "")),
-        field_name="End date",
-    )
-    if start_date and end_date and start_date > end_date:
-        raise ValueError(f"Start date {start_date} cannot be after end date {end_date}.")
-
-    cfg = BacktestConfig(
-        run_dir=run_dir,
-        dataset_path=dataset_path,
-        start_date=start_date,
-        end_date=end_date,
-        initial_capital=float(st.session_state.get(f"{_TUNING_PREFIX}initial_capital", 10_000.0)),
-        strategy_mode=str(st.session_state.get(f"{_TUNING_PREFIX}strategy_mode", "vertical")),
-        fill_model=str(st.session_state.get(f"{_TUNING_PREFIX}fill_model", "expected")),
-        fill_gate=float(st.session_state.get(f"{_TUNING_PREFIX}fill_gate", 0.45)),
-        signal_abs_gate=float(st.session_state.get(f"{_TUNING_PREFIX}signal_abs_gate", 0.04)),
-        min_edge_to_cost_ratio=float(st.session_state.get(f"{_TUNING_PREFIX}min_edge_to_cost_ratio", 1.75)),
-        max_trades_per_day=int(st.session_state.get(f"{_TUNING_PREFIX}max_trades_per_day", 2)),
-        max_contracts_per_trade=int(st.session_state.get(f"{_TUNING_PREFIX}max_contracts_per_trade", 4)),
-        max_rel_spread=float(st.session_state.get(f"{_TUNING_PREFIX}max_rel_spread", 0.10)),
-        slippage_bps=float(st.session_state.get(f"{_TUNING_PREFIX}slippage_bps", 10.0)),
-        spread_cross_fraction=float(st.session_state.get(f"{_TUNING_PREFIX}spread_cross_fraction", 0.75)),
-        option_commission_per_contract=float(
-            st.session_state.get(f"{_TUNING_PREFIX}option_commission_per_contract", 0.65)
-        ),
-        option_fee_per_contract=float(st.session_state.get(f"{_TUNING_PREFIX}option_fee_per_contract", 0.05)),
-        hedge_underlying_delta=bool(st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_delta", True)),
-        hedge_underlying_ratio=float(st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_ratio", 0.5)),
-        hedge_underlying_min_abs_shares=float(
-            st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_min_abs_shares", 15.0)
-        ),
-        hedge_underlying_max_shares=int(st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_max_shares", 50)),
-        hedge_underlying_slippage_bps=float(
-            st.session_state.get(f"{_TUNING_PREFIX}hedge_underlying_slippage_bps", 1.0)
-        ),
-        enforce_portfolio_constraints=bool(
-            st.session_state.get(f"{_TUNING_PREFIX}enforce_portfolio_constraints", True)
-        ),
-        buying_power_leverage=float(st.session_state.get(f"{_TUNING_PREFIX}buying_power_leverage", 1.0)),
-        option_short_margin_rate=float(st.session_state.get(f"{_TUNING_PREFIX}option_short_margin_rate", 0.20)),
-        underlying_margin_rate=float(st.session_state.get(f"{_TUNING_PREFIX}underlying_margin_rate", 0.50)),
-    )
-    return run_backtest(cfg)
-
-
-def _resolve_backtest_targets(
-    *, selected_run_dir: Path, selected_dataset_path: Path | None, scope_mode: str
-) -> tuple[list[tuple[str, Path, Path]], list[str]]:
-    targets: list[tuple[str, Path, Path]] = []
-    skipped: list[str] = []
-
-    if scope_mode == "All latest stocks":
-        symbol_runs = _discover_latest_runs_by_symbol(Path("outputs"))
-        if not symbol_runs:
-            skipped.append("No symbol runs discovered in `outputs/<SYMBOL>/runs`.")
-            return targets, skipped
-
-        for symbol, run_dir in sorted(symbol_runs.items()):
-            run_ok = run_dir.exists() and run_dir.is_dir()
-            if not run_ok:
-                skipped.append(f"{symbol}: run directory missing (`{run_dir}`).")
-                continue
-
-            dataset_default = Path(_dataset_default_for_run(run_dir)).expanduser()
-            dataset_ok = dataset_default.exists() and dataset_default.is_file()
-            if not dataset_ok:
-                skipped.append(f"{symbol}: dataset missing (`{dataset_default}`).")
-                continue
-            targets.append((symbol, run_dir, dataset_default))
-        return targets, skipped
-
-    run_ok = selected_run_dir.exists() and selected_run_dir.is_dir()
-    if not run_ok:
-        skipped.append(f"Selected run directory missing (`{selected_run_dir}`).")
-        return targets, skipped
-    if selected_dataset_path is None:
-        skipped.append("Selected dataset path is empty.")
-        return targets, skipped
-    if not selected_dataset_path.exists() or not selected_dataset_path.is_file():
-        skipped.append(f"Selected dataset missing (`{selected_dataset_path}`).")
-        return targets, skipped
-
-    label = _extract_symbol_from_run_dir(selected_run_dir) or selected_run_dir.name
-    targets.append((str(label), selected_run_dir, selected_dataset_path))
-    return targets, skipped
-
-
-def _render_backtest_tuning_window(run_dir: Path, dataset_path: Path | None) -> None:
-    st.title("Backtest Parameter Tuning")
-    st.caption("Tune high-impact trade-performance parameters in UI, run backtest, then inspect results.")
-
-    run_str = str(run_dir.resolve())
-    dataset_str = str(dataset_path.resolve()) if dataset_path is not None else "n/a"
-    st.markdown(
-        (
-            "<div class='block-note'>"
-            f"<b>Run directory</b>: <code>{run_str}</code><br>"
-            f"<b>Dataset</b>: <code>{dataset_str}</code>"
-            "</div>"
-        ),
-        unsafe_allow_html=True,
-    )
-
-    _seed_backtest_tuning_state(run_dir)
-
-    if st.button("Reset to Last Backtest Defaults", help="Discard UI edits and reload defaults from last backtest summary."):
-        summary_defaults = _backtest_summary_defaults(run_dir)
-        cache = st.session_state.get(_BACKTEST_TUNING_CACHE_KEY)
-        if isinstance(cache, dict):
-            cache[_BACKTEST_TUNING_SHARED_PROFILE_KEY] = summary_defaults
-        for key, value in summary_defaults.items():
-            st.session_state[f"{_TUNING_PREFIX}{key}"] = value
-        st.session_state[_BACKTEST_TUNING_SEED_KEY] = True
-        st.rerun()
-
-    scope_mode = st.radio(
-        "Backtest scope",
-        options=["All latest stocks", "Selected stock only"],
-        key=_BACKTEST_SCOPE_KEY,
-        horizontal=True,
-        help="All latest stocks runs each symbol's latest run using its dataset path from train summary.",
-    )
-
-    run_exists = run_dir.exists() and run_dir.is_dir()
-    dataset_exists = bool(dataset_path is not None and dataset_path.exists() and dataset_path.is_file())
-    if scope_mode == "Selected stock only":
-        if not run_exists:
-            st.error(f"Run directory does not exist: {run_dir}")
-        if dataset_path is None:
-            st.error("Dataset path is required.")
-        elif not dataset_exists:
-            if dataset_path.exists() and dataset_path.is_dir():
-                st.error(f"Dataset path points to a directory, expected `.npz` file: {dataset_path}")
-            else:
-                st.error(f"Dataset path does not exist: {dataset_path}")
-
-    targets, skipped = _resolve_backtest_targets(
-        selected_run_dir=run_dir,
-        selected_dataset_path=dataset_path,
-        scope_mode=str(scope_mode),
-    )
-    if skipped:
-        for msg in skipped:
-            st.warning(msg)
-    if targets:
-        target_rows = pd.DataFrame(
-            [
-                {
-                    "symbol": symbol,
-                    "run_dir": str(target_run.resolve()),
-                    "dataset_path": str(target_dataset.resolve()),
-                }
-                for symbol, target_run, target_dataset in targets
-            ]
-        )
-        st.caption(f"Backtest targets: {len(target_rows)}")
-        with st.expander("Target Runs", expanded=False):
-            st.dataframe(target_rows, use_container_width=True, hide_index=True)
-
-    st.subheader("Core Parameters")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.selectbox(
-        "Strategy mode",
-        options=["vertical", "single"],
-        key=f"{_TUNING_PREFIX}strategy_mode",
-        help="Vertical spreads cap tail risk; single-leg mode takes directional option risk directly.",
-    )
-    c2.selectbox(
-        "Fill model",
-        options=["expected", "assume"],
-        key=f"{_TUNING_PREFIX}fill_model",
-        help="'expected' scales results by fill probability. 'assume' is optimistic (always filled).",
-    )
-    c3.number_input(
-        "Max trades/day",
-        min_value=0,
-        max_value=50,
-        step=1,
-        key=f"{_TUNING_PREFIX}max_trades_per_day",
-        help="Primary throttle for daily risk and turnover.",
-    )
-    c4.number_input(
-        "Initial capital",
-        min_value=1_000.0,
-        max_value=100_000_000.0,
-        step=1_000.0,
-        key=f"{_TUNING_PREFIX}initial_capital",
-        help="Starting equity for the backtest.",
-    )
-
-    c5, c6, c7 = st.columns(3)
-    c5.number_input(
-        "Fill gate",
-        min_value=0.0,
-        max_value=1.0,
-        step=0.01,
-        key=f"{_TUNING_PREFIX}fill_gate",
-        help="Minimum predicted fill probability required to trade.",
-    )
-    c6.number_input(
-        "Signal |gate|",
-        min_value=0.0,
-        max_value=1.0,
-        step=0.005,
-        key=f"{_TUNING_PREFIX}signal_abs_gate",
-        help="Minimum absolute signal strength before considering a contract.",
-    )
-    c7.number_input(
-        "Min edge/cost ratio",
-        min_value=0.1,
-        max_value=10.0,
-        step=0.05,
-        key=f"{_TUNING_PREFIX}min_edge_to_cost_ratio",
-        help="Require edge to exceed estimated round-trip costs by this ratio.",
-    )
-
-    c7, c8, c9 = st.columns(3)
-    c7.number_input(
-        "Max contracts/trade",
-        min_value=1,
-        max_value=500,
-        step=1,
-        key=f"{_TUNING_PREFIX}max_contracts_per_trade",
-        help="Sizing cap per trade idea.",
-    )
-    c8.number_input(
-        "Max relative spread",
-        min_value=0.0,
-        max_value=1.0,
-        step=0.01,
-        key=f"{_TUNING_PREFIX}max_rel_spread",
-        help="Liquidity filter. Lower values force tighter markets.",
-    )
-    c9.number_input(
-        "Slippage (bps)",
-        min_value=0.0,
-        max_value=500.0,
-        step=0.5,
-        key=f"{_TUNING_PREFIX}slippage_bps",
-        help="Round-trip execution slippage model in basis points.",
-    )
-
-    c10, c11, c12 = st.columns(3)
-    c10.number_input(
-        "Spread cross fraction",
-        min_value=0.0,
-        max_value=1.0,
-        step=0.01,
-        key=f"{_TUNING_PREFIX}spread_cross_fraction",
-        help="Portion of half-spread paid on each fill.",
-    )
-    c11.number_input(
-        "Commission/contract",
-        min_value=0.0,
-        max_value=10.0,
-        step=0.01,
-        key=f"{_TUNING_PREFIX}option_commission_per_contract",
-    )
-    c12.number_input(
-        "Fee/contract",
-        min_value=0.0,
-        max_value=10.0,
-        step=0.01,
-        key=f"{_TUNING_PREFIX}option_fee_per_contract",
-    )
-
-    st.subheader("Hedge Parameters")
-    c13, c14, c15 = st.columns(3)
-    c13.checkbox(
-        "Enable underlying delta hedge",
-        key=f"{_TUNING_PREFIX}hedge_underlying_delta",
-        help="Adds daily underlying hedge against net option delta.",
-    )
-    c14.number_input(
-        "Hedge ratio",
-        min_value=0.0,
-        max_value=5.0,
-        step=0.05,
-        key=f"{_TUNING_PREFIX}hedge_underlying_ratio",
-        help="0.5 means hedge half of net option delta; 1.0 means near-full neutralization.",
-    )
-    c15.number_input(
-        "Hedge max shares",
-        min_value=1,
-        max_value=100000,
-        step=1,
-        key=f"{_TUNING_PREFIX}hedge_underlying_max_shares",
-    )
-
-    c16, c17 = st.columns(2)
-    c16.number_input(
-        "Hedge min |shares|",
-        min_value=0.0,
-        max_value=100000.0,
-        step=1.0,
-        key=f"{_TUNING_PREFIX}hedge_underlying_min_abs_shares",
-    )
-    c17.number_input(
-        "Hedge slippage (bps)",
-        min_value=0.0,
-        max_value=500.0,
-        step=0.1,
-        key=f"{_TUNING_PREFIX}hedge_underlying_slippage_bps",
-    )
-
-    st.subheader("Portfolio Constraints")
-    c20, c21, c22, c23 = st.columns(4)
-    c20.checkbox(
-        "Enforce capital limits",
-        key=f"{_TUNING_PREFIX}enforce_portfolio_constraints",
-        help="Reject option/hedge trades that exceed available buying power.",
-    )
-    c21.number_input(
-        "Buying power leverage",
-        min_value=0.0,
-        max_value=10.0,
-        step=0.05,
-        key=f"{_TUNING_PREFIX}buying_power_leverage",
-        help="Buying power = max(equity, 0) x leverage.",
-    )
-    c22.number_input(
-        "Option short margin rate",
-        min_value=0.0,
-        max_value=2.0,
-        step=0.01,
-        key=f"{_TUNING_PREFIX}option_short_margin_rate",
-        help="Per-contract short option margin proxy as fraction of spot notional.",
-    )
-    c23.number_input(
-        "Underlying margin rate",
-        min_value=0.0,
-        max_value=2.0,
-        step=0.01,
-        key=f"{_TUNING_PREFIX}underlying_margin_rate",
-        help="Hedge stock margin proxy as fraction of stock notional.",
-    )
-
-    st.subheader("Backtest Date Window (optional)")
-    c18, c19 = st.columns(2)
-    c18.text_input(
-        "Start date",
-        key=f"{_TUNING_PREFIX}start_date",
-        placeholder="YYYY-MM-DD",
-        help="Leave blank to use earliest available date.",
-    )
-    c19.text_input(
-        "End date",
-        key=f"{_TUNING_PREFIX}end_date",
-        placeholder="YYYY-MM-DD",
-        help="Leave blank to use latest available date.",
-    )
-
-    run_clicked = st.button(
-        "Run Backtest",
-        type="primary",
-        disabled=len(targets) == 0,
-        help="Runs only when run directory and dataset path are valid.",
-    )
-
-    if not run_clicked:
-        return
-
-    out_rows: list[tuple[str, Path]] = []
-    current_symbol = ""
-    try:
-        with st.spinner(f"Running backtest for {len(targets)} target(s)..."):
-            progress = st.progress(0.0)
-            for i, (symbol, target_run, target_dataset) in enumerate(targets, start=1):
-                current_symbol = symbol
-                out_dir = _run_backtest_from_ui(run_dir=target_run, dataset_path=target_dataset)
-                out_rows.append((symbol, out_dir))
-                progress.progress(float(i) / float(len(targets)))
-    except Exception as exc:
-        where = f" for `{current_symbol}`" if current_symbol else ""
-        st.error(f"Backtest failed{where}: {exc}")
-        return
-
-    if out_rows:
-        out_df = pd.DataFrame(
-            [{"symbol": symbol, "backtest_dir": str(path.resolve())} for symbol, path in out_rows]
-        )
-        st.success(f"Backtest complete for {len(out_rows)} target(s).")
-        st.dataframe(out_df, use_container_width=True, hide_index=True)
-    st.session_state[_BACKTEST_WINDOW_PENDING_KEY] = _WINDOW_DASHBOARD
-    st.rerun()
-
-
-def _read_json(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _read_parquet_or_csv(path: Path) -> pd.DataFrame:
-    """Read parquet if available, else fall back to CSV with the same stem."""
-    if path.exists():
-        return pd.read_parquet(path)
-    csv_path = path.with_suffix(".csv")
-    if csv_path.exists():
-        return pd.read_csv(csv_path)
-    return pd.DataFrame()
-
-
-def _load_surface_eval(eval_dir: Path) -> dict[str, np.ndarray] | None:
-    p = eval_dir / "surface_predictions.npz"
-    if not p.exists():
-        return None
-    z = np.load(p, allow_pickle=False)
-    return {k: z[k] for k in z.files}
-
-
-def _format_num(x: float | int | None, digits: int = 4) -> str:
-    if x is None:
-        return "n/a"
-    try:
-        v = float(x)
-    except Exception:
-        return "n/a"
-    if not np.isfinite(v):
-        return "n/a"
-    return f"{v:.{digits}f}"
-
-
-def _artifact_signature(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
-    sig: list[tuple[str, int, int]] = []
-    for p in paths:
+def _artifact_manifest(run_dir: Path) -> pd.DataFrame:
+    rel_paths = [
+        "model.pt",
+        "train_config.json",
+        "train_summary.json",
+        "train_history.csv",
+        "latent_states.parquet",
+        "evaluation/metrics.json",
+        "evaluation/contract_predictions.parquet",
+        "evaluation/noarb_test_dates.parquet",
+        "evaluation/noarb_forecast_test_dates.parquet",
+        "evaluation/surface_predictions.npz",
+    ]
+    rows: list[dict[str, Any]] = []
+    for rel in rel_paths:
+        p = run_dir / rel
+        row: dict[str, Any] = {
+            "artifact": rel,
+            "exists": p.exists(),
+            "size_bytes": np.nan,
+            "modified_utc": "",
+        }
         if p.exists():
-            s = p.stat()
-            sig.append((str(p), int(s.st_mtime_ns), int(s.st_size)))
-        else:
-            sig.append((str(p), -1, -1))
-    return tuple(sig)
-
-
-def _prefixed_scalar_map(data: dict | None, prefix: str) -> dict[str, object]:
-    out: dict[str, object] = {}
-    if not data:
-        return out
-    for k, v in data.items():
-        if isinstance(v, (str, int, float, bool)) or v is None:
-            out[f"{prefix}{k}"] = v
-    return out
-
-
-def _symbol_report_row(symbol: str, run_dir: Path) -> dict[str, object]:
-    eval_dir = run_dir / "evaluation"
-    bt_dir = run_dir / "backtest"
-    train_summary = _read_json(run_dir / "train_summary.json")
-    train_config = _read_json(run_dir / "train_config.json")
-    metrics = _read_json(eval_dir / "metrics.json")
-    bt_summary = _read_json(bt_dir / "summary.json")
-    row: dict[str, object] = {
-        "symbol": symbol,
-        "run_name": run_dir.name,
-        "run_dir": str(run_dir.resolve()),
-        "backtest_version": bt_summary.get("backtest_version"),
-        "generated_at_utc": bt_summary.get("generated_at_utc"),
-        "train_dataset_path": train_summary.get("dataset_path"),
-        "total_pnl": bt_summary.get("total_pnl"),
-        "daily_sharpe": bt_summary.get("daily_sharpe"),
-        "max_drawdown": bt_summary.get("max_drawdown"),
-        "trades": bt_summary.get("trades"),
-        "total_fees": bt_summary.get("total_fees"),
-        "total_options_pnl_gross": bt_summary.get("total_options_pnl_gross"),
-        "total_options_pnl": bt_summary.get("total_options_pnl"),
-        "total_hedge_pnl": bt_summary.get("total_hedge_pnl"),
-        "initial_capital": bt_summary.get("initial_capital"),
-        "enforce_portfolio_constraints": bt_summary.get("enforce_portfolio_constraints"),
-        "buying_power_leverage": bt_summary.get("buying_power_leverage"),
-        "option_short_margin_rate": bt_summary.get("option_short_margin_rate"),
-        "underlying_margin_rate": bt_summary.get("underlying_margin_rate"),
-        "capital_rejected_trades": bt_summary.get("capital_rejected_trades"),
-        "capital_rejected_hedges": bt_summary.get("capital_rejected_hedges"),
-        "buying_power_utilization_avg": bt_summary.get("buying_power_utilization_avg"),
-        "buying_power_utilization_max": bt_summary.get("buying_power_utilization_max"),
-        "risk_free_rate_annual": bt_summary.get("risk_free_rate_annual"),
-        "fill_gate": bt_summary.get("fill_gate"),
-        "slippage_bps": bt_summary.get("slippage_bps"),
-        "spread_cross_fraction": bt_summary.get("spread_cross_fraction"),
-        "option_commission_per_contract": bt_summary.get("option_commission_per_contract"),
-        "option_fee_per_contract": bt_summary.get("option_fee_per_contract"),
-        "min_edge_to_cost_ratio": bt_summary.get("min_edge_to_cost_ratio"),
-        "price_rmse": metrics.get("price_rmse"),
-        "surface_iv_rmse": metrics.get("surface_iv_rmse"),
-    }
-    row.update(_prefixed_scalar_map(train_summary, "train_"))
-    row.update(_prefixed_scalar_map(train_config, "train_cfg_"))
-    row.update(_prefixed_scalar_map(metrics, "eval_"))
-    row.update(_prefixed_scalar_map(bt_summary, "bt_"))
-    return row
-
-
-def _collect_multi_symbol_summary(symbol_runs: dict[str, Path]) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
-    for symbol, run_dir in sorted(symbol_runs.items()):
-        if not run_dir.exists():
-            continue
-        rows.append(_symbol_report_row(symbol=symbol, run_dir=run_dir))
+            stat = p.stat()
+            row["size_bytes"] = int(stat.st_size)
+            row["modified_utc"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
-def _all_symbols_report_paths(symbol_runs: dict[str, Path]) -> list[Path]:
-    paths: list[Path] = []
-    for run_dir in symbol_runs.values():
-        for rel in (
-            "train_summary.json",
-            "train_config.json",
-            "evaluation/metrics.json",
-            "backtest/summary.json",
-            "backtest/daily.parquet",
-            "backtest/daily.csv",
-        ):
-            paths.append(run_dir / rel)
-    return paths
-
-
-def _compute_backtest_stats(daily: pd.DataFrame, trades: pd.DataFrame, bt_summary: dict) -> dict[str, float]:
-    stats: dict[str, float] = {}
-    if daily.empty:
-        return stats
-
-    pnl = pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0)
-    if "equity" in daily.columns:
-        equity = pd.to_numeric(daily["equity"], errors="coerce").fillna(0.0)
-    else:
-        equity = pnl.cumsum()
-    peak = equity.cummax().replace(0.0, np.nan)
-    drawdown = (equity - peak) / peak
-
-    total_pnl = float(bt_summary.get("total_pnl", pnl.sum()))
-    trades_n = float(bt_summary.get("trades", float(daily.get("trades", pd.Series(dtype=float)).sum())))
-    wins = pnl[pnl > 0].sum()
-    losses = pnl[pnl < 0].sum()
-
-    stats["total_pnl"] = total_pnl
-    stats["daily_sharpe"] = float(bt_summary.get("daily_sharpe", np.nan))
-    stats["daily_sharpe_rf0"] = float(bt_summary.get("daily_sharpe_rf0", np.nan))
-    stats["risk_free_rate_annual"] = float(bt_summary.get("risk_free_rate_annual", np.nan))
-    stats["max_drawdown"] = float(bt_summary.get("max_drawdown", drawdown.min() if len(drawdown) else np.nan))
-    stats["win_rate"] = float(bt_summary.get("win_rate", (pnl > 0).mean()))
-    stats["avg_daily_pnl"] = float(bt_summary.get("avg_daily_pnl", pnl.mean()))
-    stats["pnl_p95"] = float(pnl.quantile(0.95))
-    stats["pnl_p05"] = float(pnl.quantile(0.05))
-    stats["best_day"] = float(pnl.max())
-    stats["worst_day"] = float(pnl.min())
-    stats["trades"] = trades_n
-    stats["avg_trades_per_day"] = float(trades_n / max(1, len(daily)))
-    stats["expectancy_per_trade"] = float(total_pnl / max(1.0, trades_n))
-
-    if losses < 0:
-        stats["profit_factor"] = float(wins / abs(losses))
-    else:
-        stats["profit_factor"] = float("nan")
-
-    if not trades.empty and "pnl" in trades.columns:
-        t_pnl = pd.to_numeric(trades["pnl"], errors="coerce").dropna()
-        if not t_pnl.empty:
-            stats["median_trade_pnl"] = float(t_pnl.median())
-            stats["trade_win_rate"] = float((t_pnl > 0).mean())
-
-    return stats
-
-
-def _build_trade_spot_volume_frame(legs: pd.DataFrame) -> pd.DataFrame:
-    out_cols = [
-        "date",
-        "date_label",
-        "date_rank",
-        "trade_key",
-        "instrument",
-        "side",
-        "leg_role",
-        "symbol",
-        "spot_exec",
-        "volume",
-        "volume_signed",
-        "volume_unit",
-        "fills",
-    ]
-    if legs.empty or "date" not in legs.columns:
-        return pd.DataFrame(columns=out_cols)
-
-    frame = legs.copy()
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date"]).copy()
-    if frame.empty:
-        return pd.DataFrame(columns=out_cols)
-
-    def _num_col(col: str) -> pd.Series:
-        if col in frame.columns:
-            return pd.to_numeric(frame[col], errors="coerce")
-        return pd.Series(np.nan, index=frame.index, dtype=float)
-
-    if "instrument" in frame.columns:
-        frame["instrument"] = frame["instrument"].astype(str).str.upper()
-    else:
-        frame["instrument"] = np.where(_num_col("shares").notna(), "UNDERLYING", "OPTION")
-
-    if "side" in frame.columns:
-        frame["side"] = frame["side"].astype(str).str.upper()
-    else:
-        frame["side"] = "UNKNOWN"
-
-    if "symbol" in frame.columns:
-        frame["symbol"] = frame["symbol"].astype(str)
-    else:
-        frame["symbol"] = ""
-
-    if "leg_role" in frame.columns:
-        frame["leg_role"] = frame["leg_role"].astype(str)
-    else:
-        frame["leg_role"] = ""
-
-    if "trade_key" in frame.columns:
-        frame["trade_key"] = frame["trade_key"].astype(str)
-    else:
-        frame["trade_key"] = ""
-
-    spot_opt = _num_col("spot")
-    spot_under = _num_col("spot_now")
-    frame["spot_exec"] = spot_opt.where(spot_opt.notna(), spot_under)
-
-    contracts = _num_col("contracts").abs()
-    shares = _num_col("shares").abs()
-    volume = pd.Series(
-        np.where(frame["instrument"].eq("UNDERLYING"), shares.to_numpy(), contracts.to_numpy()),
-        index=frame.index,
-        dtype=float,
-    )
-    frame["volume"] = volume.where(np.isfinite(volume), shares)
-    frame["volume_unit"] = np.where(frame["instrument"].eq("UNDERLYING"), "shares", "contracts")
-
-    side_sign = np.where(frame["side"].eq("LONG"), 1.0, np.where(frame["side"].eq("SHORT"), -1.0, 0.0))
-    frame["volume_signed"] = frame["volume"] * side_sign
-
-    frame = frame[
-        np.isfinite(frame["spot_exec"])
-        & np.isfinite(frame["volume"])
-        & (frame["spot_exec"] > 0.0)
-        & (frame["volume"] > 0.0)
-    ].copy()
-    if frame.empty:
-        return pd.DataFrame(columns=out_cols)
-
-    frame["date"] = frame["date"].dt.normalize()
-    frame["date_rank"] = pd.factorize(frame["date"], sort=True)[0] + 1
-    frame["date_label"] = frame["date"].dt.strftime("%Y-%m-%d")
-    frame["fills"] = 1
-    return frame[out_cols].sort_values(["date", "instrument", "spot_exec"]).reset_index(drop=True)
-
-
-def _aggregate_trade_spot_volume_by_day(trade_flow: pd.DataFrame) -> pd.DataFrame:
-    out_cols = [
-        "date",
-        "date_label",
-        "date_rank",
-        "trade_key",
-        "instrument",
-        "side",
-        "leg_role",
-        "symbol",
-        "spot_exec",
-        "volume",
-        "volume_signed",
-        "volume_unit",
-        "fills",
-    ]
-    if trade_flow.empty:
-        return pd.DataFrame(columns=out_cols)
-
-    grouped = trade_flow.copy()
-    grouped["spot_x_volume"] = grouped["spot_exec"] * grouped["volume"]
-    grouped = grouped.groupby(
-        ["date", "date_label", "date_rank", "instrument", "side", "volume_unit"], as_index=False
-    ).agg(
-        volume=("volume", "sum"),
-        volume_signed=("volume_signed", "sum"),
-        spot_x_volume=("spot_x_volume", "sum"),
-        fills=("fills", "sum"),
-    )
-    grouped["spot_exec"] = grouped["spot_x_volume"] / grouped["volume"].replace(0.0, np.nan)
-    grouped["trade_key"] = ""
-    grouped["leg_role"] = "DAILY_AGG"
-    grouped["symbol"] = ""
-    grouped = grouped[np.isfinite(grouped["spot_exec"]) & np.isfinite(grouped["volume"]) & (grouped["volume"] > 0.0)]
-    if grouped.empty:
-        return pd.DataFrame(columns=out_cols)
-    return grouped[out_cols].sort_values(["date", "instrument", "spot_exec"]).reset_index(drop=True)
-
-
-def _compute_prediction_stats(pred_test: pd.DataFrame) -> dict[str, float]:
-    out: dict[str, float] = {}
-    if pred_test.empty:
-        return out
-
-    err = pd.to_numeric(pred_test["pred_price_norm"], errors="coerce") - pd.to_numeric(
-        pred_test["target_price_norm"], errors="coerce"
-    )
-    err = err.dropna()
-    if err.empty:
-        return out
-
-    abs_err = err.abs()
-    out["bias"] = float(err.mean())
-    out["median_abs_error"] = float(abs_err.median())
-    out["p90_abs_error"] = float(abs_err.quantile(0.90))
-    out["p95_abs_error"] = float(abs_err.quantile(0.95))
-    out["within_1pct_abs"] = float((abs_err <= 0.01).mean())
-    out["within_2pct_abs"] = float((abs_err <= 0.02).mean())
-    return out
-
-
-def _surface_slice_df(
-    obs_surface: np.ndarray,
-    pred_surface: np.ndarray,
-    x_grid: np.ndarray,
-    tenor_days: np.ndarray,
-    mode: str,
-    selected: list[float],
-) -> pd.DataFrame:
-    rows: list[pd.DataFrame] = []
-    if mode == "tenor":
-        for tenor in selected:
-            j = int(np.argmin(np.abs(tenor_days - tenor)))
-            t_val = int(tenor_days[j])
-            rows.append(
-                pd.DataFrame(
-                    {
-                        "axis": x_grid,
-                        "iv": obs_surface[:, j],
-                        "series": f"{t_val}d",
-                        "model": "Observed",
-                    }
-                )
-            )
-            rows.append(
-                pd.DataFrame(
-                    {
-                        "axis": x_grid,
-                        "iv": pred_surface[:, j],
-                        "series": f"{t_val}d",
-                        "model": "Predicted",
-                    }
-                )
-            )
-        return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["axis", "iv", "series", "model"])
-
-    for x_val in selected:
-        i = int(np.argmin(np.abs(x_grid - x_val)))
-        x_pick = float(x_grid[i])
-        rows.append(
-            pd.DataFrame(
-                {
-                    "axis": tenor_days,
-                    "iv": obs_surface[i, :],
-                    "series": f"x={x_pick:.2f}",
-                    "model": "Observed",
-                }
-            )
-        )
-        rows.append(
-            pd.DataFrame(
-                {
-                    "axis": tenor_days,
-                    "iv": pred_surface[i, :],
-                    "series": f"x={x_pick:.2f}",
-                    "model": "Predicted",
-                }
-            )
-        )
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["axis", "iv", "series", "model"])
-
-
-def _surface_3d_figure(obs_surface: np.ndarray, pred_surface: np.ndarray, x_grid: np.ndarray, tenor_days: np.ndarray):
-    if not PLOTLY_AVAILABLE:
-        return None
-
-    t_mesh, x_mesh = np.meshgrid(tenor_days.astype(float), x_grid.astype(float))
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Surface(
-            x=t_mesh,
-            y=x_mesh,
-            z=obs_surface,
-            name="Observed",
-            showscale=False,
-            colorscale="Tealgrn",
-            opacity=0.95,
-        )
-    )
-    fig.add_trace(
-        go.Surface(
-            x=t_mesh,
-            y=x_mesh,
-            z=pred_surface,
-            name="Predicted",
-            showscale=False,
-            colorscale="Solar",
-            opacity=0.55,
-            contours={"z": {"show": True, "usecolormap": False, "color": "#111111", "width": 1}},
-        )
-    )
-    fig.update_layout(
-        margin={"l": 0, "r": 0, "t": 30, "b": 0},
-        height=500,
-        scene={
-            "xaxis_title": "Tenor (days)",
-            "yaxis_title": "Log-moneyness",
-            "zaxis_title": "IV",
-            "camera": {"eye": {"x": 1.4, "y": 1.4, "z": 0.9}},
-        },
-        legend={"orientation": "h", "x": 0.02, "y": 1.02},
-    )
-    return fig
-
-
-def _slice_overlay_chart(df: pd.DataFrame, mode: str):
-    if PLOTLY_AVAILABLE:
-        x_title = "Log-moneyness x=ln(K/S)" if mode == "tenor" else "Tenor (days)"
-        fig = px.line(
-            df,
-            x="axis",
-            y="iv",
-            color="series",
-            line_dash="model",
-            markers=True,
-            template="plotly_white",
-            color_discrete_sequence=px.colors.qualitative.Safe,
-        )
-        fig.update_layout(margin={"l": 0, "r": 0, "t": 20, "b": 0}, height=360, xaxis_title=x_title, yaxis_title="Implied Volatility")
-        return fig
-
-    x_title = "Log-moneyness x=ln(K/S)" if mode == "tenor" else "Tenor (days)"
-    return (
-        alt.Chart(df)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("axis:Q", title=x_title),
-            y=alt.Y("iv:Q", title="Implied Volatility"),
-            color=alt.Color("series:N"),
-            strokeDash=alt.StrokeDash("model:N"),
-            tooltip=["model", "series", "axis", "iv"],
-        )
-        .properties(height=360)
-    )
-
-
-def _scalar_items(data: dict | None) -> list[tuple[str, float | int | str | bool]]:
-    if not data:
-        return []
-    out: list[tuple[str, float | int | str | bool]] = []
-    for k, v in data.items():
-        if isinstance(v, (str, int, float, bool)):
-            out.append((str(k), v))
-    return out
-
-
-def _render_pdf_table(ax, title: str, df: pd.DataFrame, max_rows: int = 22) -> None:
-    ax.axis("off")
-    ax.set_title(title, fontsize=11, loc="left")
-    if df.empty:
-        ax.text(0.01, 0.95, "No data available.", va="top", ha="left", fontsize=10)
-        return
-
-    show = df.head(max_rows).copy()
-    for c in show.columns:
-        if pd.api.types.is_numeric_dtype(show[c]):
-            show[c] = show[c].map(lambda x: _format_num(x, 6))
-        else:
-            show[c] = show[c].astype(str)
-    table = ax.table(
-        cellText=show.to_numpy(),
-        colLabels=[str(c) for c in show.columns],
-        loc="center",
-        cellLoc="left",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(7.5)
-    table.scale(1.0, 1.2)
-    if len(df) > max_rows:
-        ax.text(
-            0.01,
-            0.02,
-            f"Showing first {max_rows} of {len(df)} rows.",
-            va="bottom",
-            ha="left",
-            fontsize=8,
-            color="#374151",
-        )
-
-
-def _build_pdf_report_bytes(run_dir: Path) -> bytes:
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_pdf import PdfPages
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError("matplotlib is required for PDF export") from exc
-
-    eval_dir = run_dir / "evaluation"
-    bt_dir = run_dir / "backtest"
-
+def _build_artifact_report(run_dir: Path) -> dict[str, Any]:
     train_summary = _read_json(run_dir / "train_summary.json")
-    metrics = _read_json(eval_dir / "metrics.json")
-    bt_summary = _read_json(bt_dir / "summary.json")
+    train_config = _read_json(run_dir / "train_config.json")
+    eval_metrics = _read_json(run_dir / "evaluation" / "metrics.json")
+    hist_tail = _train_history_tail_rows(run_dir)
+    manifest_df = _artifact_manifest(run_dir)
 
-    cfg = _read_json(run_dir / "train_config.json")
-    hist_path = run_dir / "train_history.csv"
-    pred_path = eval_dir / "contract_predictions.parquet"
-    daily_path = bt_dir / "daily.parquet"
-    trades_path = bt_dir / "trades.parquet"
-    noarb_path = eval_dir / "noarb_test_dates.parquet"
-    surf_path = eval_dir / "surface_predictions.npz"
+    dataset_path = str(train_summary.get("dataset_path", "")) if train_summary else ""
+    status = "ok" if (train_summary or eval_metrics) else "missing_artifacts"
+    updated_utc = datetime.fromtimestamp(_run_recency(run_dir), tz=timezone.utc).isoformat(timespec="seconds")
 
-    hist = pd.read_csv(hist_path) if hist_path.exists() else pd.DataFrame()
-    daily = _read_parquet_or_csv(daily_path)
-    trades = _read_parquet_or_csv(trades_path)
-    pred_df = _read_parquet_or_csv(pred_path)
-    noarb = _read_parquet_or_csv(noarb_path)
-    surf = np.load(surf_path, allow_pickle=False) if surf_path.exists() else None
-
-    if not daily.empty:
-        daily = daily.copy()
-        daily["date"] = pd.to_datetime(daily["date"])
-        daily["pnl"] = pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0)
-        if "equity" in daily.columns:
-            daily["equity"] = pd.to_numeric(daily["equity"], errors="coerce").fillna(0.0)
-        else:
-            daily["equity"] = daily["pnl"].cumsum()
-        if "options_pnl" in daily.columns:
-            daily["options_pnl"] = pd.to_numeric(daily["options_pnl"], errors="coerce").fillna(0.0)
-        else:
-            daily["options_pnl"] = 0.0
-        if "hedge_pnl" in daily.columns:
-            daily["hedge_pnl"] = pd.to_numeric(daily["hedge_pnl"], errors="coerce").fillna(0.0)
-        else:
-            daily["hedge_pnl"] = 0.0
-        if "fees" in daily.columns:
-            daily["fees"] = pd.to_numeric(daily["fees"], errors="coerce").fillna(0.0)
-        else:
-            daily["fees"] = 0.0
-        if "options_pnl_gross" in daily.columns:
-            daily["options_pnl_gross"] = pd.to_numeric(daily["options_pnl_gross"], errors="coerce").fillna(0.0)
-        else:
-            daily["options_pnl_gross"] = daily["options_pnl"] + daily["fees"]
-        for c in ("net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares"):
-            if c in daily.columns:
-                daily[c] = pd.to_numeric(daily[c], errors="coerce").fillna(0.0)
-            else:
-                daily[c] = 0.0
-        abs_net_delta = daily["net_option_delta_shares"].abs()
-        abs_post_hedge_delta = daily["post_hedge_delta_shares"].abs()
-        denom = abs_net_delta.replace(0.0, np.nan)
-        daily["hedge_risk_reduction_pct"] = (
-            ((abs_net_delta - abs_post_hedge_delta) / denom) * 100.0
-        ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        peak = daily["equity"].cummax().replace(0.0, np.nan)
-        daily["drawdown"] = (daily["equity"] - peak) / peak
-    bt_stats = _compute_backtest_stats(daily, trades, bt_summary) if not daily.empty else {}
-
-    pred_test = pd.DataFrame()
-    pred_stats: dict[str, float] = {}
-    bucket_stats = pd.DataFrame()
-    worst_errors = pd.DataFrame()
-    if not pred_df.empty:
-        pred_test = pred_df[pred_df["split"] == "test"].copy() if "split" in pred_df.columns else pred_df.copy()
-        if not pred_test.empty:
-            pred_test["error"] = pd.to_numeric(pred_test["pred_price_norm"], errors="coerce") - pd.to_numeric(
-                pred_test["target_price_norm"], errors="coerce"
-            )
-            pred_test["abs_error"] = pred_test["error"].abs()
-            pred_stats = _compute_prediction_stats(pred_test)
-            if "dte" in pred_test.columns:
-                pred_test["dte_bucket"] = pd.cut(
-                    pred_test["dte"],
-                    bins=[0, 14, 30, 60, 90, 180, 3650],
-                    labels=["<=14", "15-30", "31-60", "61-90", "91-180", ">180"],
-                    include_lowest=True,
-                )
-                bucket_stats = (
-                    pred_test.groupby(["call_put", "dte_bucket"], dropna=False, observed=False)
-                    .agg(
-                        n=("error", "count"),
-                        rmse=("error", lambda x: float(np.sqrt(np.mean(np.square(x)))) if len(x) else np.nan),
-                        mae=("abs_error", "mean"),
-                        bias=("error", "mean"),
-                    )
-                    .reset_index()
-                    .sort_values(["call_put", "dte_bucket"])
-                )
-            keep_cols = [
-                c
-                for c in [
-                    "date",
-                    "symbol",
-                    "call_put",
-                    "dte",
-                    "target_price_norm",
-                    "pred_price_norm",
-                    "error",
-                    "abs_error",
-                ]
-                if c in pred_test.columns
-            ]
-            if "abs_error" in pred_test.columns and keep_cols:
-                worst_errors = pred_test.nlargest(25, "abs_error")[keep_cols]
-
-    obs = pred_surface = x_grid = tenor_days = surf_dates = None
-    fit_df = pd.DataFrame()
-    if surf is not None:
-        obs = surf["iv_surface_obs"].astype(np.float32)
-        pred_surface = surf["iv_surface_pred"].astype(np.float32)
-        x_grid = surf["x_grid"].astype(np.float32)
-        tenor_days = surf["tenor_days"].astype(np.int32)
-        surf_dates = pd.to_datetime(surf["dates"].astype(str))
-        fit_df = pd.DataFrame(
-            {
-                "date": surf_dates,
-                "surface_rmse": np.sqrt(np.mean((pred_surface - obs) ** 2, axis=(1, 2))),
-                "surface_mae": np.mean(np.abs(pred_surface - obs), axis=(1, 2)),
-            }
-        )
-
-    daily_desc = (
-        daily["pnl"].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).to_frame("daily_pnl").reset_index()
-        if not daily.empty
-        else pd.DataFrame()
-    )
-    grouped_trades = pd.DataFrame()
-    if not trades.empty and {"side", "call_put", "pnl"}.issubset(trades.columns):
-        t = trades.copy()
-        t["pnl"] = pd.to_numeric(t["pnl"], errors="coerce")
-        agg: dict[str, tuple[str, object]] = {
-            "trades": ("pnl", "count"),
-            "pnl_sum": ("pnl", "sum"),
-            "pnl_mean": ("pnl", "mean"),
-            "win_rate": ("pnl", lambda x: float((x > 0).mean()) if len(x) else np.nan),
-        }
-        if "signal" in t.columns:
-            agg["signal_median"] = ("signal", "median")
-        if "fill_prob" in t.columns:
-            agg["fill_prob_mean"] = ("fill_prob", "mean")
-        grouped_trades = (
-            t.groupby(["side", "call_put"], dropna=False)
-            .agg(**agg)
-            .reset_index()
-            .sort_values("pnl_sum", ascending=False)
-        )
-
-    buf = BytesIO()
-    with PdfPages(buf) as pdf:
-        # Page 1: executive summary and key metrics
-        kpi_rows = [
-            ("Prediction", "Price RMSE", metrics.get("price_rmse")),
-            ("Prediction", "Price MAE", metrics.get("price_mae")),
-            ("Prediction", "Next-Day Price R2", metrics.get("next_price_r2", metrics.get("price_r2"))),
-            ("Prediction", "Exec Brier", metrics.get("exec_brier")),
-            ("Surface", "Surface RMSE", metrics.get("surface_iv_rmse")),
-            ("Surface", "Surface MAE", metrics.get("surface_iv_mae")),
-            ("Surface", "Calendar Viol Pred", metrics.get("calendar_violation_pred_mean")),
-            ("Surface", "Butterfly Viol Pred", metrics.get("butterfly_violation_pred_mean")),
-            ("Backtest", "Total PnL", bt_stats.get("total_pnl", bt_summary.get("total_pnl"))),
-            ("Backtest", "Daily Sharpe", bt_stats.get("daily_sharpe", bt_summary.get("daily_sharpe"))),
-            ("Backtest", "Max Drawdown", bt_stats.get("max_drawdown", bt_summary.get("max_drawdown"))),
-            ("Backtest", "Profit Factor", bt_stats.get("profit_factor")),
-            ("Backtest", "Trades", bt_stats.get("trades", bt_summary.get("trades"))),
-            ("Backtest", "Total Fees", bt_summary.get("total_fees", float(daily["fees"].sum()) if not daily.empty else np.nan)),
-            (
-                "Backtest",
-                "Options PnL Gross",
-                bt_summary.get("total_options_pnl_gross", float(daily["options_pnl_gross"].sum()) if not daily.empty else np.nan),
-            ),
-            ("Backtest", "Options PnL", float(daily["options_pnl"].sum()) if not daily.empty else np.nan),
-            ("Backtest", "Hedge PnL", float(daily["hedge_pnl"].sum()) if not daily.empty else np.nan),
-            ("Backtest", "Fill Gate", bt_summary.get("fill_gate")),
-            ("Backtest", "Slippage (bps)", bt_summary.get("slippage_bps")),
-            ("Backtest", "Spread Cross Fraction", bt_summary.get("spread_cross_fraction")),
-            ("Backtest", "Option Comm/Contract", bt_summary.get("option_commission_per_contract")),
-            ("Backtest", "Option Fee/Contract", bt_summary.get("option_fee_per_contract")),
-            ("Backtest", "Min Edge/Cost Ratio", bt_summary.get("min_edge_to_cost_ratio")),
-            (
-                "Backtest",
-                "Avg Hedge Risk Reduction (%)",
-                float(daily["hedge_risk_reduction_pct"].mean()) if not daily.empty else np.nan,
-            ),
-            ("Backtest", "Avg |Hedge Shares|", float(daily["hedge_shares"].abs().mean()) if not daily.empty else np.nan),
-            ("Prediction", "Median |Error|", pred_stats.get("median_abs_error")),
-            ("Prediction", "P95 |Error|", pred_stats.get("p95_abs_error")),
-        ]
-        kpi_df = pd.DataFrame(kpi_rows, columns=["section", "metric", "value"])
-
-        run_lines = [
-            f"Run: {run_dir.name}",
-            f"Generated (UTC): {pd.Timestamp.utcnow().isoformat()}",
-            f"Training model path: {train_summary.get('model_path', 'n/a')}",
-            f"Dataset path: {train_summary.get('dataset_path', 'n/a')}",
-            f"Training device: {train_summary.get('device', 'n/a')}",
-        ]
-        if not daily.empty:
-            run_lines.append(
-                f"Backtest window: {daily['date'].min().date()} to {daily['date'].max().date()} "
-                f"({len(daily)} days)"
-            )
-        if not pred_test.empty:
-            run_lines.append(f"Prediction test contracts: {len(pred_test)}")
-        if surf_dates is not None and len(surf_dates):
-            run_lines.append(
-                f"Surface eval window: {surf_dates.min().date()} to {surf_dates.max().date()} ({len(surf_dates)} dates)"
-            )
-
-        fig = plt.figure(figsize=(11, 8.5))
-        gs = fig.add_gridspec(1, 2, width_ratios=[1.15, 1.0])
-        left = fig.add_subplot(gs[0, 0])
-        right = fig.add_subplot(gs[0, 1])
-        left.axis("off")
-        left.set_title("Run Summary", fontsize=12, loc="left")
-        left.text(0.01, 0.98, "\n".join(run_lines), va="top", ha="left", fontsize=10)
-        fig.suptitle(f"IV Dynamics Report: {run_dir.name}", fontsize=16, y=0.99)
-        _render_pdf_table(right, "Key Metrics (UI Summary + Tabs)", kpi_df, max_rows=24)
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 2: backtest charts
-        fig, axes = plt.subplots(2, 2, figsize=(11, 8.2))
-        fig.suptitle("Backtest & PnL Evidence", fontsize=14)
-        if daily.empty:
-            for ax in axes.ravel():
-                ax.axis("off")
-                ax.text(0.5, 0.5, "No backtest daily artifact.", ha="center", va="center", fontsize=11)
-        else:
-            axes[0, 0].plot(daily["date"], daily["equity"], color="#0f766e")
-            axes[0, 0].set_title("Equity Curve")
-            axes[0, 0].set_ylabel("Equity")
-
-            axes[0, 1].fill_between(daily["date"], daily["drawdown"], 0.0, color="#b91c1c", alpha=0.35)
-            axes[0, 1].set_title("Drawdown")
-            axes[0, 1].set_ylabel("Drawdown")
-
-            colors = np.where(daily["pnl"] >= 0.0, "#0f766e", "#b91c1c")
-            axes[1, 0].bar(daily["date"], daily["pnl"], color=colors, width=1.6)
-            axes[1, 0].set_title("Daily PnL")
-            axes[1, 0].set_ylabel("PnL")
-
-            axes[1, 1].hist(daily["pnl"].to_numpy(), bins=40, color="#334155", alpha=0.85)
-            axes[1, 1].set_title("PnL Distribution")
-            axes[1, 1].set_xlabel("Daily PnL")
-            for ax in axes.ravel():
-                ax.tick_params(axis="x", labelrotation=30)
-        fig.tight_layout()
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 3: hedge diagnostics
-        if not daily.empty:
-            fig, axes = plt.subplots(2, 2, figsize=(11, 8.2))
-            fig.suptitle("Hedge Diagnostics", fontsize=14)
-
-            hedge_colors = np.where(daily["hedge_shares"] >= 0.0, "#0f766e", "#b91c1c")
-            axes[0, 0].bar(daily["date"], daily["hedge_shares"], color=hedge_colors, width=1.6)
-            axes[0, 0].set_title("Hedge Amount Per Day (Shares)")
-            axes[0, 0].set_ylabel("Shares")
-
-            axes[0, 1].plot(daily["date"], daily["net_option_delta_shares"], label="Net option delta", color="#0f766e")
-            axes[0, 1].plot(daily["date"], daily["post_hedge_delta_shares"], label="Post-hedge delta", color="#111827")
-            axes[0, 1].set_title("Delta Exposure (Shares)")
-            axes[0, 1].set_ylabel("Shares")
-            axes[0, 1].legend(fontsize=8)
-
-            axes[1, 0].bar(daily["date"], daily["hedge_pnl"], color="#d97706", alpha=0.7, width=1.6, label="Hedge PnL")
-            ax2 = axes[1, 0].twinx()
-            ax2.plot(daily["date"], daily["hedge_risk_reduction_pct"], color="#111827", linewidth=1.5, label="Risk reduction %")
-            axes[1, 0].set_title("Hedge Contribution to PnL and Risk Reduction")
-            axes[1, 0].set_ylabel("Hedge PnL")
-            ax2.set_ylabel("Risk Reduction (%)")
-            h1, l1 = axes[1, 0].get_legend_handles_labels()
-            h2, l2 = ax2.get_legend_handles_labels()
-            axes[1, 0].legend(h1 + h2, l1 + l2, fontsize=8, loc="best")
-
-            axes[1, 1].hist(daily["hedge_risk_reduction_pct"].to_numpy(), bins=40, color="#334155", alpha=0.85)
-            axes[1, 1].set_title("Risk Reduction Distribution")
-            axes[1, 1].set_xlabel("Risk Reduction (%)")
-
-            for ax in axes.ravel():
-                ax.tick_params(axis="x", labelrotation=30)
-            fig.tight_layout()
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-        # Page 4: backtest numeric evidence
-        fig = plt.figure(figsize=(11, 8.5))
-        gs = fig.add_gridspec(3, 1, height_ratios=[1.0, 1.0, 0.9])
-        ax0 = fig.add_subplot(gs[0, 0])
-        ax1 = fig.add_subplot(gs[1, 0])
-        ax2 = fig.add_subplot(gs[2, 0])
-        _render_pdf_table(ax0, "Daily PnL Summary", daily_desc)
-        _render_pdf_table(ax1, "Trade Group Diagnostics (side x call_put)", grouped_trades)
-        hedge_summary_rows: list[dict[str, object]] = []
-        if not daily.empty:
-            total_pnl = float(daily["pnl"].sum())
-            hedge_total = float(daily["hedge_pnl"].sum())
-            options_gross = float(daily["options_pnl_gross"].sum())
-            total_fees = float(daily["fees"].sum())
-            hedge_summary_rows = [
-                {"metric": "fees_total", "value": total_fees},
-                {"metric": "options_pnl_total", "value": float(daily["options_pnl"].sum())},
-                {"metric": "options_pnl_gross_total", "value": options_gross},
-                {"metric": "fee_drag_pct_of_options_gross", "value": (100.0 * total_fees / abs(options_gross)) if abs(options_gross) > 1e-12 else np.nan},
-                {"metric": "hedge_pnl_total", "value": hedge_total},
-                {
-                    "metric": "hedge_pnl_pct_of_total",
-                    "value": (100.0 * hedge_total / total_pnl) if abs(total_pnl) > 1e-12 else np.nan,
-                },
-                {"metric": "avg_abs_hedge_shares", "value": float(daily["hedge_shares"].abs().mean())},
-                {"metric": "avg_abs_net_option_delta_shares", "value": float(daily["net_option_delta_shares"].abs().mean())},
-                {"metric": "avg_abs_post_hedge_delta_shares", "value": float(daily["post_hedge_delta_shares"].abs().mean())},
-                {"metric": "avg_hedge_risk_reduction_pct", "value": float(daily["hedge_risk_reduction_pct"].mean())},
-                {"metric": "median_hedge_risk_reduction_pct", "value": float(daily["hedge_risk_reduction_pct"].median())},
-            ]
-        _render_pdf_table(ax2, "Hedge Summary", pd.DataFrame(hedge_summary_rows))
-        fig.suptitle("Backtest Numeric Evidence", fontsize=14)
-        fig.tight_layout()
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 5: surface overlays (heatmaps + slices)
-        if obs is not None and pred_surface is not None and x_grid is not None and tenor_days is not None and surf_dates is not None:
-            i = len(obs) - 1
-            err = pred_surface[i] - obs[i]
-            fig, axes = plt.subplots(2, 2, figsize=(11, 8.2))
-            fig.suptitle(f"Surface Overlays ({surf_dates[i].date()})", fontsize=14)
-
-            im0 = axes[0, 0].imshow(obs[i], aspect="auto", origin="lower")
-            axes[0, 0].set_title("Observed Surface")
-            axes[0, 0].set_xlabel("Tenor idx")
-            axes[0, 0].set_ylabel("Moneyness idx")
-            plt.colorbar(im0, ax=axes[0, 0], shrink=0.8)
-
-            im1 = axes[0, 1].imshow(pred_surface[i], aspect="auto", origin="lower")
-            axes[0, 1].set_title("Predicted Surface")
-            axes[0, 1].set_xlabel("Tenor idx")
-            axes[0, 1].set_ylabel("Moneyness idx")
-            plt.colorbar(im1, ax=axes[0, 1], shrink=0.8)
-
-            im2 = axes[1, 0].imshow(err, aspect="auto", origin="lower")
-            axes[1, 0].set_title("Surface Error (Pred - Obs)")
-            axes[1, 0].set_xlabel("Tenor idx")
-            axes[1, 0].set_ylabel("Moneyness idx")
-            plt.colorbar(im2, ax=axes[1, 0], shrink=0.8)
-
-            tenor_targets = [t for t in (30, 90) if len(tenor_days)]
-            for t in tenor_targets:
-                j = int(np.argmin(np.abs(tenor_days - t)))
-                axes[1, 1].plot(x_grid, obs[i, :, j], label=f"Obs {int(tenor_days[j])}d")
-                axes[1, 1].plot(x_grid, pred_surface[i, :, j], linestyle="--", label=f"Pred {int(tenor_days[j])}d")
-            axes[1, 1].set_title("Slice Overlay by Tenor")
-            axes[1, 1].set_xlabel("Log-moneyness")
-            axes[1, 1].set_ylabel("IV")
-            axes[1, 1].legend(fontsize=8)
-            fig.tight_layout()
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-            fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
-            for x_target in (-0.10, 0.0, 0.10):
-                ix = int(np.argmin(np.abs(x_grid - x_target)))
-                x_pick = float(x_grid[ix])
-                axes[0].plot(tenor_days, obs[i, ix, :], label=f"Obs x={x_pick:.2f}")
-                axes[0].plot(tenor_days, pred_surface[i, ix, :], linestyle="--", label=f"Pred x={x_pick:.2f}")
-            axes[0].set_title("Slice Overlay by Moneyness")
-            axes[0].set_xlabel("Tenor (days)")
-            axes[0].set_ylabel("IV")
-            axes[0].legend(fontsize=8)
-
-            axes[1].scatter(obs[i].ravel(), pred_surface[i].ravel(), s=16, alpha=0.45)
-            lim = float(max(np.max(obs[i]), np.max(pred_surface[i])))
-            axes[1].plot([0.0, lim], [0.0, lim], color="black", linewidth=1.0)
-            axes[1].set_title("Surface Point Fit: Pred vs Obs")
-            axes[1].set_xlabel("Observed IV")
-            axes[1].set_ylabel("Predicted IV")
-            fig.tight_layout()
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-        # Page 6: prediction error charts
-        if not pred_test.empty:
-            sample = pred_test.sample(min(len(pred_test), 8000), random_state=7)
-            fig, axes = plt.subplots(1, 3, figsize=(14, 4.8))
-            axes[0].scatter(sample["target_price_norm"], sample["pred_price_norm"], s=8, alpha=0.3)
-            top = float(max(sample["target_price_norm"].max(), sample["pred_price_norm"].max()))
-            axes[0].plot([0.0, top], [0.0, top], color="black", linewidth=1)
-            axes[0].set_title("Predicted vs Observed Price")
-            axes[0].set_xlabel("Observed")
-            axes[0].set_ylabel("Predicted")
-
-            axes[1].hist(pred_test["error"].dropna().to_numpy(), bins=70, color="#334155", alpha=0.85)
-            axes[1].set_title("Error Distribution")
-            axes[1].set_xlabel("Prediction Error")
-
-            if not bucket_stats.empty:
-                b = bucket_stats.copy()
-                b["bucket"] = b["call_put"].astype(str) + ":" + b["dte_bucket"].astype(str)
-                axes[2].barh(b["bucket"], b["rmse"], color="#0f766e", alpha=0.8)
-                axes[2].set_title("RMSE by CP x DTE Bucket")
-                axes[2].set_xlabel("RMSE")
-            else:
-                axes[2].axis("off")
-                axes[2].text(0.5, 0.5, "No bucket diagnostics.", ha="center", va="center")
-            fig.suptitle("Prediction Error Diagnostics", fontsize=14)
-            fig.tight_layout()
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-            fig = plt.figure(figsize=(11, 8.5))
-            gs = fig.add_gridspec(2, 1, height_ratios=[1.1, 0.9])
-            ax0 = fig.add_subplot(gs[0, 0])
-            ax1 = fig.add_subplot(gs[1, 0])
-            _render_pdf_table(ax0, "Prediction Bucket Stats", bucket_stats)
-            _render_pdf_table(ax1, "Worst Contract Errors", worst_errors)
-            fig.suptitle("Prediction Numeric Evidence", fontsize=14)
-            fig.tight_layout()
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-        # Page 7: training diagnostics charts
-        if not hist.empty and "stage" in hist.columns and "epoch" in hist.columns:
-            hist = hist.copy()
-            hist["epoch"] = pd.to_numeric(hist["epoch"], errors="coerce")
-            plot_cols = [
-                c
-                for c in [
-                    "loss",
-                    "recon_loss",
-                    "val_recon_loss",
-                    "dyn_loss",
-                    "price_loss",
-                    "exec_loss",
-                    "val_dyn_loss",
-                    "val_price_loss",
-                    "val_exec_loss",
-                    "kl_loss",
-                    "calendar_loss",
-                ]
-                if c in hist.columns
-            ]
-            n_panels = min(6, len(plot_cols))
-            if n_panels > 0:
-                fig, axes = plt.subplots(2, 3, figsize=(11, 8.2))
-                axes_flat = axes.ravel()
-                for i in range(6):
-                    ax = axes_flat[i]
-                    if i >= n_panels:
-                        ax.axis("off")
-                        continue
-                    col = plot_cols[i]
-                    for stage in sorted(hist["stage"].dropna().astype(str).unique().tolist()):
-                        sub = hist[hist["stage"].astype(str) == stage]
-                        y = pd.to_numeric(sub[col], errors="coerce")
-                        if y.notna().any():
-                            ax.plot(sub["epoch"], y, label=stage)
-                    ax.set_title(col)
-                    ax.set_xlabel("Epoch")
-                axes_flat[0].legend(fontsize=8)
-                fig.suptitle("Training Diagnostics", fontsize=14)
-                fig.tight_layout()
-                pdf.savefig(fig, bbox_inches="tight")
-                plt.close(fig)
-
-            by_stage = hist.groupby("stage", dropna=False).agg(
-                epochs=("epoch", "count"),
-                final_loss=("loss", "last") if "loss" in hist.columns else ("epoch", "count"),
-                min_loss=("loss", "min") if "loss" in hist.columns else ("epoch", "count"),
-                final_val_recon=("val_recon_loss", "last") if "val_recon_loss" in hist.columns else ("epoch", "count"),
-            )
-            fig = plt.figure(figsize=(11, 8.5))
-            gs = fig.add_gridspec(2, 1, height_ratios=[0.9, 1.1])
-            ax0 = fig.add_subplot(gs[0, 0])
-            ax1 = fig.add_subplot(gs[1, 0])
-            _render_pdf_table(ax0, "Training Stage Summary", by_stage.reset_index())
-            ax1.axis("off")
-            ax1.set_title("Training Config", fontsize=11, loc="left")
-            cfg_text = json.dumps(cfg, indent=2) if cfg else "{}"
-            ax1.text(0.01, 0.98, cfg_text, family="monospace", fontsize=8.2, va="top", ha="left")
-            fig.suptitle("Training Numeric Evidence", fontsize=14)
-            fig.tight_layout()
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-        # Page 8: fits diagnostics
-        if not fit_df.empty or not noarb.empty:
-            fig, axes = plt.subplots(2, 1, figsize=(11, 8.2))
-            fig.suptitle("Fit Diagnostics", fontsize=14)
-
-            if not fit_df.empty:
-                axes[0].plot(fit_df["date"], fit_df["surface_rmse"], label="surface_rmse", color="#0f766e")
-                axes[0].plot(fit_df["date"], fit_df["surface_mae"], label="surface_mae", color="#7c3aed")
-                axes[0].set_title("Surface Fit Over Time")
-                axes[0].set_ylabel("Error")
-                axes[0].legend()
-                axes[0].tick_params(axis="x", labelrotation=30)
-            else:
-                axes[0].axis("off")
-                axes[0].text(0.5, 0.5, "No surface fit artifact.", ha="center", va="center")
-
-            if not noarb.empty and {"date", "calendar_obs", "calendar_pred", "butterfly_obs", "butterfly_pred"}.issubset(noarb.columns):
-                nn = noarb.copy()
-                nn["date"] = pd.to_datetime(nn["date"])
-                axes[1].plot(nn["date"], nn["calendar_obs"], label="calendar_obs")
-                axes[1].plot(nn["date"], nn["calendar_pred"], label="calendar_pred")
-                axes[1].plot(nn["date"], nn["butterfly_obs"], label="butterfly_obs")
-                axes[1].plot(nn["date"], nn["butterfly_pred"], label="butterfly_pred")
-                axes[1].set_title("No-Arbitrage Diagnostics")
-                axes[1].set_ylabel("Violation Rate")
-                axes[1].legend(fontsize=8, ncol=2)
-                axes[1].tick_params(axis="x", labelrotation=30)
-            else:
-                axes[1].axis("off")
-                axes[1].text(0.5, 0.5, "No no-arbitrage diagnostics.", ha="center", va="center")
-            fig.tight_layout()
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-        # Page 9: raw report payloads
-        payload = {
-            "train_summary": train_summary,
-            "train_config": cfg,
-            "eval_metrics": metrics,
-            "backtest_summary": bt_summary,
-            "backtest_stats": bt_stats,
-            "prediction_stats": pred_stats,
-        }
-        payload_rows: list[dict[str, object]] = []
-        for section, values in payload.items():
-            for k, v in _scalar_items(values if isinstance(values, dict) else {}):
-                payload_rows.append({"section": section, "metric": k, "value": v})
-        fig = plt.figure(figsize=(11, 8.5))
-        ax = fig.add_subplot(111)
-        _render_pdf_table(ax, "Raw JSON Scalars (all report sections)", pd.DataFrame(payload_rows), max_rows=55)
-        fig.suptitle("Raw JSON Summary", fontsize=14)
-        fig.tight_layout()
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-    buf.seek(0)
-    return buf.getvalue()
+    return {
+        "id": f"artifact_{int(datetime.now(tz=timezone.utc).timestamp() * 1000)}",
+        "timestamp_utc": _utc_now(),
+        "run_type": "artifact_review",
+        "status": status,
+        "dataset_path": dataset_path,
+        "training_parameters": _json_safe(train_config),
+        "evaluation_parameters": {"source": "artifacts"},
+        "run_dir": str(run_dir.resolve()),
+        "run_updated_utc": updated_utc,
+        "train_summary": _json_safe(train_summary),
+        "evaluation_metrics": _json_safe(eval_metrics),
+        "train_history_tail": _json_safe(hist_tail),
+        "artifact_manifest": _json_safe(manifest_df.to_dict(orient="records")),
+        "error": "",
+    }
 
 
-@st.cache_data(show_spinner=False)
-def _build_pdf_report_cached(run_dir_str: str, signature: tuple[tuple[str, int, int], ...]) -> bytes:
-    _ = signature
-    return _build_pdf_report_bytes(Path(run_dir_str))
+def _extract_openai_text(payload: dict[str, Any]) -> str:
+    def _text_from_value(v: Any) -> str:
+        if isinstance(v, str):
+            return v.strip()
+        if isinstance(v, dict):
+            for k in ("value", "text", "output_text", "content"):
+                if k in v:
+                    t = _text_from_value(v.get(k))
+                    if t:
+                        return t
+            return ""
+        if isinstance(v, list):
+            parts = [_text_from_value(x) for x in v]
+            parts = [p for p in parts if p]
+            return "\n\n".join(parts).strip()
+        return ""
 
+    chunks: list[str] = []
 
-def _build_all_symbols_pdf_report_bytes(symbol_runs: dict[str, Path]) -> bytes:
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_pdf import PdfPages
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError("matplotlib is required for PDF export") from exc
+    raw = payload.get("output_text")
+    if isinstance(raw, str) and raw.strip():
+        chunks.append(raw.strip())
+    elif isinstance(raw, list):
+        parsed = _text_from_value(raw)
+        if parsed:
+            chunks.append(parsed)
 
-    summary = _collect_multi_symbol_summary(symbol_runs)
-    if summary.empty:
-        raise RuntimeError("No symbol runs were found under outputs/<SYMBOL>/runs.")
-
-    for c in (
-        "total_pnl",
-        "daily_sharpe",
-        "max_drawdown",
-        "trades",
-        "total_fees",
-        "total_options_pnl_gross",
-        "total_options_pnl",
-        "total_hedge_pnl",
-        "risk_free_rate_annual",
-        "fill_gate",
-        "slippage_bps",
-        "spread_cross_fraction",
-        "option_commission_per_contract",
-        "option_fee_per_contract",
-        "min_edge_to_cost_ratio",
-        "price_rmse",
-        "surface_iv_rmse",
-    ):
-        if c in summary.columns:
-            summary[c] = pd.to_numeric(summary[c], errors="coerce")
-
-    summary = summary.sort_values("symbol").reset_index(drop=True)
-    overview_cols = [
-        "symbol",
-        "run_name",
-        "backtest_version",
-        "total_pnl",
-        "daily_sharpe",
-        "max_drawdown",
-        "trades",
-        "total_fees",
-        "total_options_pnl_gross",
-        "total_options_pnl",
-        "total_hedge_pnl",
-    ]
-    cost_cols = [
-        "symbol",
-        "fill_gate",
-        "slippage_bps",
-        "spread_cross_fraction",
-        "option_commission_per_contract",
-        "option_fee_per_contract",
-        "min_edge_to_cost_ratio",
-    ]
-    overview_cols = [c for c in overview_cols if c in summary.columns]
-    cost_cols = [c for c in cost_cols if c in summary.columns]
-
-    buf = BytesIO()
-    with PdfPages(buf) as pdf:
-        # Page 1: executive summary
-        fig = plt.figure(figsize=(11, 8.5))
-        gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.3])
-        ax_l = fig.add_subplot(gs[0, 0])
-        ax_r = fig.add_subplot(gs[0, 1])
-        ax_l.axis("off")
-        lines = [
-            "Scope: all symbols discovered in outputs/<SYMBOL>/runs",
-            f"Generated (UTC): {pd.Timestamp.utcnow().isoformat()}",
-            f"Symbols: {', '.join(summary['symbol'].astype(str).tolist())}",
-            f"Total symbols: {len(summary)}",
-            f"Aggregate total PnL: {_format_num(float(summary['total_pnl'].sum()), 2)}",
-            f"Aggregate total fees: {_format_num(float(summary['total_fees'].sum()), 2)}",
-            f"Median daily Sharpe: {_format_num(float(summary['daily_sharpe'].median()), 3)}",
-        ]
-        ax_l.set_title("Portfolio Report", fontsize=12, loc="left")
-        ax_l.text(0.01, 0.98, "\n".join(lines), va="top", ha="left", fontsize=10)
-        _render_pdf_table(ax_r, "Cross-Symbol Overview", summary[overview_cols], max_rows=14)
-        fig.suptitle("IV Dynamics Multi-Symbol Report", fontsize=16, y=0.99)
-        fig.tight_layout()
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 2: PnL and Sharpe comparisons
-        fig, axes = plt.subplots(2, 1, figsize=(11, 8.2))
-        order = summary.sort_values("total_pnl", ascending=False)["symbol"].astype(str).tolist()
-        pnl_df = summary.set_index("symbol").loc[order].reset_index()
-        colors = np.where(pnl_df["total_pnl"] >= 0.0, "#0f766e", "#b91c1c")
-        axes[0].bar(pnl_df["symbol"], pnl_df["total_pnl"], color=colors, alpha=0.9)
-        axes[0].set_title("Total PnL by Symbol")
-        axes[0].set_ylabel("PnL")
-        axes[0].tick_params(axis="x", labelrotation=0)
-
-        axes[1].bar(pnl_df["symbol"], pnl_df["daily_sharpe"], color="#334155", alpha=0.9)
-        axes[1].set_title("Daily Sharpe by Symbol")
-        axes[1].set_ylabel("Sharpe")
-        axes[1].tick_params(axis="x", labelrotation=0)
-        fig.tight_layout()
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Page 3: cost and execution setup comparison
-        fig = plt.figure(figsize=(11, 8.5))
-        gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 1.0])
-        ax0 = fig.add_subplot(gs[0, 0])
-        ax1 = fig.add_subplot(gs[1, 0])
-        _render_pdf_table(ax0, "Cost & Execution Parameters", summary[cost_cols], max_rows=20)
-        fee_cols = [
-            c
-            for c in ["symbol", "total_fees", "total_options_pnl_gross", "total_options_pnl", "total_hedge_pnl"]
-            if c in summary.columns
-        ]
-        fee_view = summary[fee_cols].copy()
-        if {"total_fees", "total_options_pnl_gross"}.issubset(set(fee_view.columns)):
-            fee_view["fee_drag_pct_of_options_gross"] = np.where(
-                fee_view["total_options_pnl_gross"].abs() > 1e-12,
-                100.0 * fee_view["total_fees"] / fee_view["total_options_pnl_gross"].abs(),
-                np.nan,
-            )
-        _render_pdf_table(ax1, "Cost Outcomes", fee_view, max_rows=20)
-        fig.suptitle("Cost and Execution Diagnostics", fontsize=14)
-        fig.tight_layout()
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-        # Symbol detail pages (full scalar payloads)
-        for _, row in summary.iterrows():
-            run_dir = Path(str(row.get("run_dir", "")))
-            train_summary = _read_json(run_dir / "train_summary.json")
-            train_config = _read_json(run_dir / "train_config.json")
-            eval_metrics = _read_json(run_dir / "evaluation" / "metrics.json")
-            bt_summary = _read_json(run_dir / "backtest" / "summary.json")
-
-            fig = plt.figure(figsize=(11, 8.5))
-            gs = fig.add_gridspec(3, 1, height_ratios=[0.55, 1.0, 1.0])
-            ax_h = fig.add_subplot(gs[0, 0])
-            ax_a = fig.add_subplot(gs[1, 0])
-            ax_b = fig.add_subplot(gs[2, 0])
-            ax_h.axis("off")
-            header_lines = [
-                f"Symbol: {row.get('symbol', 'n/a')}",
-                f"Run: {row.get('run_name', 'n/a')}",
-                f"Backtest version: {row.get('backtest_version', 'n/a')}",
-                f"Generated UTC: {row.get('generated_at_utc', 'n/a')}",
-                f"Run path: {row.get('run_dir', 'n/a')}",
-            ]
-            ax_h.text(0.01, 0.95, "\n".join(header_lines), va="top", ha="left", fontsize=10)
-            perf = pd.DataFrame(
-                [
-                    {"metric": "total_pnl", "value": row.get("total_pnl")},
-                    {"metric": "daily_sharpe", "value": row.get("daily_sharpe")},
-                    {"metric": "max_drawdown", "value": row.get("max_drawdown")},
-                    {"metric": "trades", "value": row.get("trades")},
-                    {"metric": "price_rmse", "value": row.get("price_rmse")},
-                    {"metric": "surface_iv_rmse", "value": row.get("surface_iv_rmse")},
-                ]
-            )
-            costs = pd.DataFrame(
-                [
-                    {"metric": "total_fees", "value": row.get("total_fees")},
-                    {"metric": "total_options_pnl_gross", "value": row.get("total_options_pnl_gross")},
-                    {"metric": "total_options_pnl", "value": row.get("total_options_pnl")},
-                    {"metric": "total_hedge_pnl", "value": row.get("total_hedge_pnl")},
-                    {"metric": "fill_gate", "value": row.get("fill_gate")},
-                    {"metric": "slippage_bps", "value": row.get("slippage_bps")},
-                    {"metric": "spread_cross_fraction", "value": row.get("spread_cross_fraction")},
-                    {"metric": "option_commission_per_contract", "value": row.get("option_commission_per_contract")},
-                    {"metric": "option_fee_per_contract", "value": row.get("option_fee_per_contract")},
-                    {"metric": "min_edge_to_cost_ratio", "value": row.get("min_edge_to_cost_ratio")},
-                ]
-            )
-            _render_pdf_table(ax_a, "Performance", perf, max_rows=18)
-            _render_pdf_table(ax_b, "Costs & Execution", costs, max_rows=20)
-            fig.suptitle(f"Symbol Detail: {row.get('symbol', 'n/a')}", fontsize=14)
-            fig.tight_layout()
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-            full_rows: list[dict[str, object]] = []
-            for section, payload in (
-                ("train_summary", train_summary),
-                ("train_config", train_config),
-                ("eval_metrics", eval_metrics),
-                ("backtest_summary", bt_summary),
-            ):
-                for k, v in _scalar_items(payload):
-                    full_rows.append({"section": section, "metric": k, "value": v})
-            full_df = pd.DataFrame(full_rows)
-            if full_df.empty:
+    output = payload.get("output")
+    if isinstance(output, list):
+        for block in output:
+            if not isinstance(block, dict):
                 continue
-            rows_per_page = 48
-            pages = int(np.ceil(len(full_df) / rows_per_page))
-            for page in range(pages):
-                lo = page * rows_per_page
-                hi = min(len(full_df), lo + rows_per_page)
-                fig = plt.figure(figsize=(11, 8.5))
-                ax = fig.add_subplot(111)
-                _render_pdf_table(
-                    ax,
-                    f"All Scalar Fields ({lo + 1}-{hi} of {len(full_df)})",
-                    full_df.iloc[lo:hi].reset_index(drop=True),
-                    max_rows=rows_per_page,
-                )
-                fig.suptitle(
-                    f"Symbol Detail Scalars: {row.get('symbol', 'n/a')} (Page {page + 1}/{pages})",
-                    fontsize=13,
-                )
-                fig.tight_layout()
-                pdf.savefig(fig, bbox_inches="tight")
-                plt.close(fig)
+            if block.get("type") == "output_text":
+                txt = _text_from_value(block.get("text"))
+                if txt:
+                    chunks.append(txt)
+            content = block.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    txt = _text_from_value(item.get("text"))
+                    if not txt:
+                        txt = _text_from_value(item)
+                    if txt:
+                        chunks.append(txt)
 
-    buf.seek(0)
-    return buf.getvalue()
+    # Compatibility fallback for chat-completions shaped payloads.
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for ch in choices:
+            if not isinstance(ch, dict):
+                continue
+            msg = ch.get("message")
+            if isinstance(msg, dict):
+                txt = _text_from_value(msg.get("content"))
+                if txt:
+                    chunks.append(txt)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for c in chunks:
+        cc = c.strip()
+        if not cc or cc in seen:
+            continue
+        seen.add(cc)
+        deduped.append(cc)
+    return "\n\n".join(deduped).strip()
 
 
-@st.cache_data(show_spinner=False)
-def _build_all_symbols_pdf_report_cached(
-    symbol_runs_items: tuple[tuple[str, str], ...], signature: tuple[tuple[str, int, int], ...]
-) -> bytes:
-    _ = signature
-    symbol_runs = {symbol: Path(run_dir) for symbol, run_dir in symbol_runs_items}
-    return _build_all_symbols_pdf_report_bytes(symbol_runs)
-
-
-def _render_backtest_tab(bt_dir: Path) -> None:
-    st.caption("Performance evidence focused on returns, risk, and distribution stability.")
-
-    daily_path = bt_dir / "daily.parquet"
-    trades_path = bt_dir / "trades.parquet"
-    legs_path = bt_dir / "legs.parquet"
-    summary_path = bt_dir / "summary.json"
-
-    if not daily_path.exists():
-        st.info("Backtest artifacts not found. Run `ivdyn backtest ...` first.")
-        return
-
-    daily = _read_parquet_or_csv(daily_path)
-    trades = _read_parquet_or_csv(trades_path)
-    legs = _read_parquet_or_csv(legs_path)
-    bt_summary = _read_json(summary_path)
-    trade_flow = _build_trade_spot_volume_frame(legs)
-
-    daily["date"] = pd.to_datetime(daily["date"])
-    daily = daily.sort_values("date").reset_index(drop=True)
-    daily["pnl"] = pd.to_numeric(daily["pnl"], errors="coerce").fillna(0.0)
-    daily["equity"] = pd.to_numeric(daily["equity"], errors="coerce").fillna(0.0)
-    if "options_pnl" in daily.columns:
-        daily["options_pnl"] = pd.to_numeric(daily["options_pnl"], errors="coerce").fillna(0.0)
-    else:
-        daily["options_pnl"] = 0.0
-    if "hedge_pnl" in daily.columns:
-        daily["hedge_pnl"] = pd.to_numeric(daily["hedge_pnl"], errors="coerce").fillna(0.0)
-    else:
-        daily["hedge_pnl"] = 0.0
-    if "fees" in daily.columns:
-        daily["fees"] = pd.to_numeric(daily["fees"], errors="coerce").fillna(0.0)
-    else:
-        daily["fees"] = 0.0
-    if "options_pnl_gross" in daily.columns:
-        daily["options_pnl_gross"] = pd.to_numeric(daily["options_pnl_gross"], errors="coerce").fillna(0.0)
-    else:
-        daily["options_pnl_gross"] = daily["options_pnl"] + daily["fees"]
-    try:
-        buying_power_leverage = float(bt_summary.get("buying_power_leverage", 1.0))
-    except Exception:
-        buying_power_leverage = 1.0
-    buying_power_leverage = max(buying_power_leverage, 0.0)
-    initial_capital = float(bt_summary.get("initial_capital", 0.0))
-    if "equity_start" in daily.columns:
-        equity_start = pd.to_numeric(daily["equity_start"], errors="coerce")
-    else:
-        equity_start = pd.Series(np.nan, index=daily.index, dtype=float)
-    equity_start_fallback = pd.to_numeric(daily["equity"], errors="coerce").shift(1).fillna(initial_capital)
-    equity_start = equity_start.fillna(equity_start_fallback)
-
-    if "buying_power_limit" in daily.columns:
-        bp_limit_existing = pd.to_numeric(daily["buying_power_limit"], errors="coerce")
-    else:
-        bp_limit_existing = pd.Series(np.nan, index=daily.index, dtype=float)
-    bp_limit_derived = np.clip(equity_start.to_numpy(dtype=float), 0.0, None) * buying_power_leverage
-    daily["buying_power_limit"] = np.where(np.isfinite(bp_limit_existing), bp_limit_existing, bp_limit_derived)
-    daily["buying_power_limit"] = pd.to_numeric(daily["buying_power_limit"], errors="coerce").fillna(0.0)
-
-    if "buying_power_used_options" in daily.columns:
-        daily["buying_power_used_options"] = pd.to_numeric(daily["buying_power_used_options"], errors="coerce").fillna(0.0)
-    else:
-        daily["buying_power_used_options"] = 0.0
-    if "buying_power_used_hedge" in daily.columns:
-        daily["buying_power_used_hedge"] = pd.to_numeric(daily["buying_power_used_hedge"], errors="coerce").fillna(0.0)
-    else:
-        daily["buying_power_used_hedge"] = 0.0
-    if "buying_power_used_total" in daily.columns:
-        bp_used_total_existing = pd.to_numeric(daily["buying_power_used_total"], errors="coerce")
-        bp_used_total_fallback = daily["buying_power_used_options"] + daily["buying_power_used_hedge"]
-        daily["buying_power_used_total"] = bp_used_total_existing.fillna(bp_used_total_fallback)
-    else:
-        daily["buying_power_used_total"] = daily["buying_power_used_options"] + daily["buying_power_used_hedge"]
-    daily["buying_power_used_total"] = pd.to_numeric(daily["buying_power_used_total"], errors="coerce").fillna(0.0)
-    daily["buying_power_remaining"] = daily["buying_power_limit"] - daily["buying_power_used_total"]
-    if "buying_power_utilization" in daily.columns:
-        bp_util_existing = pd.to_numeric(daily["buying_power_utilization"], errors="coerce")
-        bp_util_fallback = daily["buying_power_used_total"] / daily["buying_power_limit"].replace(0.0, np.nan)
-        daily["buying_power_utilization"] = bp_util_existing.fillna(bp_util_fallback)
-    else:
-        daily["buying_power_utilization"] = daily["buying_power_used_total"] / daily["buying_power_limit"].replace(0.0, np.nan)
-    daily["buying_power_utilization"] = pd.to_numeric(daily["buying_power_utilization"], errors="coerce").fillna(0.0)
-    for c in ("net_option_delta_shares", "hedge_shares", "post_hedge_delta_shares"):
-        if c in daily.columns:
-            daily[c] = pd.to_numeric(daily[c], errors="coerce").fillna(0.0)
-        else:
-            daily[c] = 0.0
-    abs_net_delta = daily["net_option_delta_shares"].abs()
-    abs_post_hedge_delta = daily["post_hedge_delta_shares"].abs()
-    denom = abs_net_delta.replace(0.0, np.nan)
-    daily["hedge_risk_reduction_pct"] = (
-        ((abs_net_delta - abs_post_hedge_delta) / denom) * 100.0
-    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    peak = daily["equity"].cummax().replace(0.0, np.nan)
-    daily["drawdown"] = (daily["equity"] - peak) / peak
-
-    stats = _compute_backtest_stats(daily, trades, bt_summary)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total PnL", f"{_format_num(stats.get('total_pnl'), 2)}")
-    c2.metric("Sharpe (Excess)", _format_num(stats.get("daily_sharpe"), 3))
-    c3.metric("Max Drawdown", _format_num(stats.get("max_drawdown"), 3))
-    c4.metric("Profit Factor", _format_num(stats.get("profit_factor"), 3))
-
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Trades", f"{int(stats.get('trades', 0))}")
-    c6.metric("Expectancy/Trade", _format_num(stats.get("expectancy_per_trade"), 2))
-    c7.metric("Best Day", _format_num(stats.get("best_day"), 2))
-    c8.metric("Worst Day", _format_num(stats.get("worst_day"), 2))
-
-    c9, c10, c11, c12 = st.columns(4)
-    c9.metric("Win Rate", _format_num(stats.get("win_rate"), 3))
-    c10.metric("Avg Daily PnL", _format_num(stats.get("avg_daily_pnl"), 2))
-    c11.metric("Trade Win Rate", _format_num(stats.get("trade_win_rate"), 3))
-    c12.metric("Sharpe (rf=0)", _format_num(stats.get("daily_sharpe_rf0"), 3))
-
-    total_fees = float(bt_summary.get("total_fees", daily["fees"].sum()))
-    options_gross = float(bt_summary.get("total_options_pnl_gross", daily["options_pnl_gross"].sum()))
-    options_net = float(bt_summary.get("total_options_pnl", daily["options_pnl"].sum()))
-    fee_drag_pct = (100.0 * total_fees / abs(options_gross)) if abs(options_gross) > 1e-12 else np.nan
-    latest_bp_limit = float(daily["buying_power_limit"].iloc[-1]) if not daily.empty else np.nan
-    latest_bp_used = float(daily["buying_power_used_total"].iloc[-1]) if not daily.empty else np.nan
-    latest_bp_remaining = float(daily["buying_power_remaining"].iloc[-1]) if not daily.empty else np.nan
-    latest_bp_util_pct = (
-        100.0 * float(daily["buying_power_utilization"].iloc[-1]) if not daily.empty else np.nan
+def _build_openai_feedback_prompt(report: dict[str, Any]) -> tuple[str, str]:
+    system_text = (
+        "You are a senior quantitative researcher reviewing an options-volatility ML system. "
+        "Return specific, testable recommendations to improve model quality in training/evaluation workflows. "
+        "Do not provide backtesting, portfolio allocation, or discretionary trading advice. "
+        "Ground suggestions in financial microstructure and options theory (vol surface behavior, no-arbitrage, "
+        "execution-probability calibration, and forecast skill). "
+        "Avoid generic advice; each suggestion must include rationale, expected metric impact, and tradeoff/risk."
     )
 
-    with st.expander("Costs & Execution Details", expanded=False):
-        ec1, ec2, ec3, ec4 = st.columns(4)
-        ec1.metric("Total Fees", _format_num(total_fees, 2))
-        ec2.metric("Options PnL (Gross)", _format_num(options_gross, 2))
-        ec3.metric("Options PnL (Net)", _format_num(options_net, 2))
-        ec4.metric("Fee Drag vs Gross", f"{_format_num(fee_drag_pct, 2)}%")
+    goal_context = {
+        "primary_goal": "Improve training and evaluation quality for IV dynamics modeling.",
+        "workflow_scope": "Training + evaluation only. Ignore backtesting recommendations.",
+        "success_signals": [
+            "Lower price_rmse",
+            "Higher price_r2",
+            "Lower exec_brier",
+            "Lower surface_forecast_iv_rmse",
+            "More stable validation losses in train_history",
+        ],
+        "constraints": [
+            "Recommendations should be directly actionable in CLI-driven train/eval runs.",
+            "Prefer changes that can be validated by artifacts already produced in this repo.",
+        ],
+    }
 
-        ec5, ec6, ec7, ec8 = st.columns(4)
-        ec5.metric("Option Comm/Contract", _format_num(bt_summary.get("option_commission_per_contract"), 4))
-        ec6.metric("Option Fee/Contract", _format_num(bt_summary.get("option_fee_per_contract"), 4))
-        ec7.metric("Slippage (bps)", _format_num(bt_summary.get("slippage_bps"), 2))
-        ec8.metric("Spread Cross Fraction", _format_num(bt_summary.get("spread_cross_fraction"), 3))
+    financial_basis = {
+        "domain": "US equity options implied-volatility dynamics",
+        "state_representation": "Latent state learned from IV surface snapshots over x=ln(K/S) and tenor_days",
+        "model_outputs": [
+            "Option price target (normalized by spot)",
+            "Execution/fill probability target",
+            "Surface reconstruction and one-step-ahead surface forecast",
+        ],
+        "financial_principles": [
+            "Smile/skew and term-structure behavior should be stable and economically plausible",
+            "No-arbitrage diagnostics matter (calendar and butterfly violations)",
+            "Near-ATM and short-tenor contracts can dominate risk and should be treated carefully",
+            "Execution probability quality should be judged via calibration-oriented metrics like Brier score",
+            "Forecast skill should be compared to persistence/carry baselines, not judged in isolation",
+        ],
+        "metric_interpretation": {
+            "price_rmse": "Lower is better (same-day fit quality for normalized option price)",
+            "price_r2": "Higher is better (especially next-day predictive quality where available)",
+            "exec_brier": "Lower is better (better probability calibration for fills)",
+            "surface_forecast_iv_rmse": "Lower is better (forward IV surface forecast quality)",
+            "calendar_violation_*": "Lower is better (fewer calendar-arbitrage inconsistencies)",
+            "butterfly_violation_*": "Lower is better (fewer convexity/arbitrage inconsistencies)",
+        },
+    }
 
-        ec9, ec10, ec11, ec12 = st.columns(4)
-        ec9.metric("Buying Power Leverage", _format_num(bt_summary.get("buying_power_leverage"), 2))
-        ec10.metric("Buying Power Used", _format_num(latest_bp_used, 2))
-        ec11.metric("Remaining Buying Power", _format_num(latest_bp_remaining, 2))
-        ec12.metric("BP Utilization (Latest)", f"{_format_num(latest_bp_util_pct, 2)}%")
+    context = {
+        "goal_context": goal_context,
+        "financial_basis": financial_basis,
+        "run_type": report.get("run_type"),
+        "status": report.get("status"),
+        "dataset_path": report.get("dataset_path"),
+        "run_dir": report.get("run_dir"),
+        "training_parameters": _json_safe(report.get("training_parameters", {})),
+        "evaluation_parameters": _json_safe(report.get("evaluation_parameters", {})),
+        "train_summary": _json_safe(report.get("train_summary", {})),
+        "evaluation_metrics": _json_safe(report.get("evaluation_metrics", {})),
+        "train_history_tail": _json_safe(report.get("train_history_tail", [])),
+    }
+    user_text = (
+        "Given this run output, project goal, and financial basis, provide:\n"
+        "1) Top 5 prioritized improvements (highest impact first)\n"
+        "2) For each: financial/technical rationale, exact metrics expected to change, and expected direction\n"
+        "3) Concrete next-run parameter changes (only fields that should be modified)\n"
+        "4) Sanity checks to validate that improvements are real (including baseline checks and overfitting checks)\n"
+        "5) Risks/failure-modes for each recommendation\n\n"
+        "Keep the response structured and explicit. Use short sections and bullet points.\n\n"
+        f"RUN_CONTEXT_JSON:\n{json.dumps(context, indent=2, sort_keys=True)}"
+    )
+    return system_text, user_text
 
-        execution_rows = [
-            ("initial_capital", bt_summary.get("initial_capital")),
-            ("strategy_mode", bt_summary.get("strategy_mode")),
-            ("fill_model", bt_summary.get("fill_model")),
-            ("fill_gate", bt_summary.get("fill_gate")),
-            ("min_edge_to_cost_ratio", bt_summary.get("min_edge_to_cost_ratio")),
-            ("max_trades_per_day", bt_summary.get("max_trades_per_day")),
-            ("signal_abs_gate", bt_summary.get("signal_abs_gate")),
-            ("enforce_portfolio_constraints", bt_summary.get("enforce_portfolio_constraints")),
-            ("buying_power_leverage", bt_summary.get("buying_power_leverage")),
-            ("option_short_margin_rate", bt_summary.get("option_short_margin_rate")),
-            ("underlying_margin_rate", bt_summary.get("underlying_margin_rate")),
-            ("capital_rejected_trades", bt_summary.get("capital_rejected_trades")),
-            ("capital_rejected_hedges", bt_summary.get("capital_rejected_hedges")),
-            ("buying_power_utilization_avg", bt_summary.get("buying_power_utilization_avg")),
-            ("buying_power_utilization_max", bt_summary.get("buying_power_utilization_max")),
-            ("buying_power_limit_latest", latest_bp_limit),
-            ("buying_power_used_latest", latest_bp_used),
-            ("buying_power_remaining_latest", latest_bp_remaining),
-            ("risk_free_rate_annual", bt_summary.get("risk_free_rate_annual")),
-        ]
-        exec_df = pd.DataFrame(execution_rows, columns=["metric", "value"])
-        st.dataframe(exec_df, use_container_width=True, hide_index=True)
 
-        fee_chart = (
-            alt.Chart(daily)
-            .mark_bar(color="#6b8f2a", opacity=0.65)
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("fees:Q", title="Daily Fees"),
-                tooltip=[
-                    "date:T",
-                    alt.Tooltip("fees:Q", title="Fees"),
-                    alt.Tooltip("options_pnl_gross:Q", title="Options PnL gross"),
-                    alt.Tooltip("options_pnl:Q", title="Options PnL net"),
-                ],
-            )
-        )
-        net_options_line = (
-            alt.Chart(daily)
-            .mark_line(color="#111827", point=True)
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("options_pnl:Q", title="Options PnL (Net)"),
-                tooltip=["date:T", alt.Tooltip("options_pnl:Q", title="Options PnL net")],
-            )
-        )
-        st.altair_chart(
-            alt.layer(fee_chart, net_options_line)
-            .resolve_scale(y="independent")
-            .properties(height=230, title="Daily Fees vs Net Options PnL"),
-            use_container_width=True,
-        )
+def _request_openai_feedback(
+    report: dict[str, Any],
+    *,
+    model: str,
+    timeout_seconds: int,
+) -> tuple[dict[str, Any], str | None, dict[str, Any] | None, str | None]:
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return {}, None, None, "Missing OPENAI_API_KEY in environment or .env file."
 
-        bp_long = daily[["date", "buying_power_limit", "buying_power_used_total", "buying_power_remaining"]].melt(
-            id_vars=["date"],
-            var_name="series",
-            value_name="value",
-        )
-        bp_long["series"] = bp_long["series"].map(
+    system_text, user_text = _build_openai_feedback_prompt(report)
+    request_payload: dict[str, Any] = {
+        "model": model,
+        "input": [
             {
-                "buying_power_limit": "Limit",
-                "buying_power_used_total": "Used",
-                "buying_power_remaining": "Remaining",
-            }
-        )
-        bp_chart = (
-            alt.Chart(bp_long)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("value:Q", title="Buying Power"),
-                color=alt.Color(
-                    "series:N",
-                    scale=alt.Scale(
-                        domain=["Limit", "Used", "Remaining"],
-                        range=["#111827", "#b91c1c", "#0f766e"],
-                    ),
-                    title="Series",
-                ),
-                tooltip=[
-                    "date:T",
-                    alt.Tooltip("series:N", title="Series"),
-                    alt.Tooltip("value:Q", title="Value"),
-                ],
+                "role": "system",
+                "content": [{"type": "input_text", "text": system_text}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": user_text}],
+            },
+        ],
+    }
+
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    url = f"{base_url}/responses"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    read_timeout = max(30, int(os.environ.get("OPENAI_TIMEOUT_SECONDS", str(timeout_seconds))))
+    connect_timeout = max(5, int(os.environ.get("OPENAI_CONNECT_TIMEOUT_SECONDS", "10")))
+    max_retries = max(1, int(os.environ.get("OPENAI_MAX_RETRIES", "3")))
+    retry_backoff_seconds = max(1.0, float(os.environ.get("OPENAI_RETRY_BACKOFF_SECONDS", "2.0")))
+
+    last_error: str | None = None
+    last_raw: dict[str, Any] | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(
+                url,
+                headers=headers,
+                json=request_payload,
+                timeout=(connect_timeout, read_timeout),
             )
-            .properties(height=240, title="Buying Power Over Time")
-        )
-        st.altair_chart(bp_chart, use_container_width=True)
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        eq = (
-            alt.Chart(daily)
-            .mark_line(color="#0f766e")
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("equity:Q", title="Equity"),
-                tooltip=["date:T", "equity:Q", "pnl:Q", "trades:Q"],
+        except (requests.exceptions.ReadTimeout, requests.exceptions.Timeout) as exc:
+            last_error = (
+                f"OpenAI request timed out on attempt {attempt}/{max_retries} "
+                f"(connect={connect_timeout}s, read={read_timeout}s): {exc}"
             )
-            .properties(height=280, title="Equity Curve")
-        )
-        st.altair_chart(eq, use_container_width=True)
+            if attempt < max_retries:
+                time.sleep(retry_backoff_seconds * float(attempt))
+                continue
+            return request_payload, None, last_raw, last_error
+        except requests.exceptions.ConnectionError as exc:
+            last_error = f"OpenAI connection failed on attempt {attempt}/{max_retries}: {exc}"
+            if attempt < max_retries:
+                time.sleep(retry_backoff_seconds * float(attempt))
+                continue
+            return request_payload, None, last_raw, last_error
+        except Exception as exc:
+            return request_payload, None, last_raw, f"OpenAI request failed: {exc}"
 
-        dd = (
-            alt.Chart(daily)
-            .mark_area(color="#b91c1c", opacity=0.35)
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("drawdown:Q", title="Drawdown"),
-                tooltip=["date:T", "drawdown:Q"],
-            )
-            .properties(height=190, title="Drawdown")
-        )
-        st.altair_chart(dd, use_container_width=True)
+        if resp.status_code in {429, 500, 502, 503, 504} and attempt < max_retries:
+            last_error = f"OpenAI API temporary error ({resp.status_code}) on attempt {attempt}/{max_retries}."
+            time.sleep(retry_backoff_seconds * float(attempt))
+            continue
 
-    with col_b:
-        daily_bar = (
-            alt.Chart(daily)
-            .mark_bar()
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("pnl:Q", title="Daily PnL"),
-                color=alt.condition("datum.pnl >= 0", alt.value("#0f766e"), alt.value("#b91c1c")),
-                tooltip=["date:T", "pnl:Q", "trades:Q"],
-            )
-            .properties(height=280, title="Daily PnL")
-        )
-        st.altair_chart(daily_bar, use_container_width=True)
+        if resp.status_code >= 400:
+            body_snippet = resp.text.strip()[:1200]
+            return request_payload, None, last_raw, f"OpenAI API error ({resp.status_code}): {body_snippet}"
 
-        pnl_hist = (
-            alt.Chart(daily)
-            .mark_bar(opacity=0.85)
-            .encode(
-                alt.X("pnl:Q", bin=alt.Bin(maxbins=40), title="Daily PnL"),
-                alt.Y("count():Q", title="Count"),
-            )
-            .properties(height=190, title="PnL Distribution")
-        )
-        st.altair_chart(pnl_hist, use_container_width=True)
+        try:
+            response_json = resp.json()
+        except Exception as exc:
+            return request_payload, None, last_raw, f"OpenAI API returned non-JSON response: {exc}"
 
-    with st.expander("Hedge Diagnostics", expanded=False):
-        h1, h2, h3 = st.columns(3)
-        h1.metric("Hedge PnL", _format_num(float(daily["hedge_pnl"].sum()), 2))
-        h2.metric("Avg Risk Reduction", f"{_format_num(float(daily['hedge_risk_reduction_pct'].mean()), 2)}%")
-        h3.metric("Avg |Hedge Shares|", _format_num(float(daily["hedge_shares"].abs().mean()), 1))
+        last_raw = response_json
+        text = _extract_openai_text(response_json)
+        if not text:
+            text = "OpenAI responded without extractable text. Inspect raw response JSON."
+        return request_payload, text, response_json, None
 
-        hedge_amt_chart = (
-            alt.Chart(daily)
-            .mark_bar()
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("hedge_shares:Q", title="Hedge Shares"),
-                color=alt.condition("datum.hedge_shares >= 0", alt.value("#0f766e"), alt.value("#b91c1c")),
-                tooltip=[
-                    "date:T",
-                    alt.Tooltip("hedge_shares:Q", title="Hedge shares"),
-                    alt.Tooltip("net_option_delta_shares:Q", title="Option delta shares"),
-                    alt.Tooltip("post_hedge_delta_shares:Q", title="Post-hedge delta"),
-                ],
-            )
-            .properties(height=220, title="Hedge Amount Per Day")
-        )
-        st.altair_chart(hedge_amt_chart, use_container_width=True)
-
-        hedge_pnl_bar = (
-            alt.Chart(daily)
-            .mark_bar(color="#d97706", opacity=0.6)
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("hedge_pnl:Q", title="Hedge PnL"),
-                tooltip=[
-                    "date:T",
-                    alt.Tooltip("hedge_pnl:Q", title="Hedge PnL"),
-                    alt.Tooltip("options_pnl:Q", title="Options PnL"),
-                    alt.Tooltip("pnl:Q", title="Total PnL"),
-                ],
-            )
-        )
-        risk_reduction_line = (
-            alt.Chart(daily)
-            .mark_line(color="#111827", point=True)
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("hedge_risk_reduction_pct:Q", title="Delta Risk Reduction (%)"),
-                tooltip=[
-                    "date:T",
-                    alt.Tooltip("hedge_risk_reduction_pct:Q", title="Risk reduction %"),
-                    alt.Tooltip("net_option_delta_shares:Q", title="Option delta shares"),
-                    alt.Tooltip("post_hedge_delta_shares:Q", title="Post-hedge delta"),
-                ],
-            )
-        )
-        st.altair_chart(
-            alt.layer(hedge_pnl_bar, risk_reduction_line)
-            .resolve_scale(y="independent")
-            .properties(height=240, title="Hedge Contribution to PnL and Risk Reduction"),
-            use_container_width=True,
-        )
-
-    with st.expander("Executed Trade Footprint (Spot vs Volume)", expanded=False):
-        if trade_flow.empty:
-            st.info("No leg-level execution records found with usable spot and size fields.")
-        else:
-            has_underlying = bool((trade_flow["instrument"] == "UNDERLYING").any())
-            if has_underlying:
-                st.caption("Includes option legs and underlying hedge trades.")
-            else:
-                st.caption("No underlying stock trades in this run; showing options only.")
-
-            instruments = ["OPTION"] + (["UNDERLYING"] if has_underlying else [])
-            selected_instruments = st.multiselect(
-                "Instruments",
-                options=instruments,
-                default=instruments,
-                key="bt_trade_footprint_instruments",
-            )
-            time_adjust = st.radio(
-                "Time adjustment",
-                options=["Per execution", "Daily aggregate"],
-                horizontal=True,
-                key="bt_trade_footprint_time_adjust",
-                help="Daily aggregate uses volume-weighted spot by day/instrument/side.",
-            )
-            volume_basis = st.radio(
-                "Volume basis",
-                options=["Share-equivalent (options x100)", "Native (contracts vs shares)"],
-                horizontal=True,
-                key="bt_trade_footprint_volume_basis",
-                help="Native mixes contracts and shares; share-equivalent converts 1 option contract to 100 shares.",
-            )
-            use_signed_volume = st.checkbox(
-                "Use signed volume (SHORT as negative)",
-                value=False,
-                key="bt_trade_footprint_signed",
-            )
-
-            if not selected_instruments:
-                st.warning("Select at least one instrument to render the chart.")
-            else:
-                footprint = trade_flow[trade_flow["instrument"].isin(selected_instruments)].copy()
-                if time_adjust == "Daily aggregate":
-                    footprint = _aggregate_trade_spot_volume_by_day(footprint)
-
-                if footprint.empty:
-                    st.warning("No trades match the selected footprint filters.")
-                else:
-                    footprint["volume_plot"] = pd.to_numeric(footprint["volume"], errors="coerce")
-                    footprint["volume_signed_plot"] = pd.to_numeric(footprint["volume_signed"], errors="coerce")
-                    if volume_basis.startswith("Share-equivalent"):
-                        option_scale = np.where(footprint["instrument"].eq("OPTION"), 100.0, 1.0)
-                        footprint["volume_plot"] = footprint["volume_plot"] * option_scale
-                        footprint["volume_signed_plot"] = footprint["volume_signed_plot"] * option_scale
-                        y_base_title = "Share-Equivalent Volume"
-                    else:
-                        y_base_title = "Volume"
-
-                    y_col = "volume_signed_plot" if use_signed_volume else "volume_plot"
-                    y_title = f"Signed {y_base_title}" if use_signed_volume else y_base_title
-                    brush = alt.selection_interval(encodings=["x"], name="trade_window")
-                    spot_min = float(pd.to_numeric(footprint["spot_exec"], errors="coerce").min())
-                    spot_max = float(pd.to_numeric(footprint["spot_exec"], errors="coerce").max())
-                    if np.isfinite(spot_min) and np.isfinite(spot_max):
-                        if spot_max > spot_min:
-                            x_pad = 0.05 * (spot_max - spot_min)
-                        else:
-                            x_pad = max(1.0, 0.01 * abs(spot_min))
-                        x_scale = alt.Scale(domain=[spot_min - x_pad, spot_max + x_pad], zero=False)
-                    else:
-                        x_scale = alt.Scale(zero=False)
-
-                    timeline = (
-                        alt.Chart(footprint)
-                        .mark_bar(opacity=0.72)
-                        .encode(
-                            x=alt.X("date:T", title="Date"),
-                            y=alt.Y("sum(volume_plot):Q", title=y_base_title),
-                            color=alt.Color("instrument:N", title="Instrument"),
-                            tooltip=[
-                                "date:T",
-                                "instrument:N",
-                                alt.Tooltip("sum(volume_plot):Q", title=y_base_title),
-                                alt.Tooltip("sum(fills):Q", title="Fills"),
-                            ],
-                        )
-                        .add_params(brush)
-                        .properties(height=110, title="Volume Timeline (brush to filter)")
-                    )
-
-                    scatter = (
-                        alt.Chart(footprint)
-                        .mark_circle(size=86, opacity=0.68)
-                        .encode(
-                            x=alt.X("spot_exec:Q", title="Spot", scale=x_scale),
-                            y=alt.Y(f"{y_col}:Q", title=y_title),
-                            color=alt.Color(
-                                "date_rank:Q",
-                                title="Trade Day #",
-                                scale=alt.Scale(scheme="tealblues"),
-                            ),
-                            shape=alt.Shape("instrument:N", title="Instrument"),
-                            tooltip=[
-                                "date:T",
-                                alt.Tooltip("date_rank:Q", title="Trade day #"),
-                                "instrument:N",
-                                "side:N",
-                                "leg_role:N",
-                                "symbol:N",
-                                alt.Tooltip("spot_exec:Q", title="Spot"),
-                                alt.Tooltip("volume_plot:Q", title=y_base_title),
-                                alt.Tooltip("volume_signed_plot:Q", title=f"Signed {y_base_title}"),
-                                alt.Tooltip("volume:Q", title="Volume"),
-                                alt.Tooltip("volume_signed:Q", title="Signed volume"),
-                                alt.Tooltip("fills:Q", title="Fills"),
-                                "volume_unit:N",
-                            ],
-                        )
-                        .transform_filter(brush)
-                        .properties(height=300, title="Spot vs Volume Footprint")
-                    )
-
-                    st.altair_chart(
-                        alt.vconcat(timeline, scatter).resolve_scale(color="independent"),
-                        use_container_width=True,
-                    )
-                    st.caption(
-                        "Timeline uses real trading dates (including gaps). Brush any period above to inspect how "
-                        "spot/volume footprint changes over time."
-                    )
-
-    with st.expander("Distribution & Trade Breakdown", expanded=False):
-        daily_desc = daily["pnl"].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).to_frame("daily_pnl")
-        st.dataframe(daily_desc, use_container_width=True)
-
-        if not trades.empty:
-            trades = trades.copy()
-            trades["pnl"] = pd.to_numeric(trades["pnl"], errors="coerce")
-            grouped = (
-                trades.groupby(["side", "call_put"], dropna=False)
-                .agg(
-                    trades=("pnl", "count"),
-                    pnl_sum=("pnl", "sum"),
-                    pnl_mean=("pnl", "mean"),
-                    win_rate=("pnl", lambda x: float((x > 0).mean()) if len(x) else np.nan),
-                    signal_median=("signal", "median"),
-                    fill_prob_mean=("fill_prob", "mean"),
-                )
-                .reset_index()
-                .sort_values("pnl_sum", ascending=False)
-            )
-            st.dataframe(grouped, use_container_width=True, hide_index=True)
+    return request_payload, None, last_raw, (last_error or "OpenAI request failed for unknown reason.")
 
 
-def _render_surface_tab(eval_dir: Path) -> None:
-    st.caption("Interactive fit inspection: 3D surface overlay plus configurable slice overlays.")
-
-    surf = _load_surface_eval(eval_dir)
-    if surf is None:
-        st.info("No surface prediction artifact found.")
-        return
-
-    dates = surf["dates"].astype(str)
-    x_grid = surf["x_grid"].astype(np.float32)
-    tenor_days = surf["tenor_days"].astype(np.int32)
-    obs = surf["iv_surface_obs"].astype(np.float32)
-    pred = surf["iv_surface_pred"].astype(np.float32)
-
-    idx = st.slider("Select surface date", min_value=0, max_value=len(dates) - 1, value=len(dates) - 1)
-    st.caption(f"Date: {dates[idx]}")
-
-    err = pred[idx] - obs[idx]
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Surface RMSE", _format_num(float(np.sqrt(np.mean(err**2)))))
-    c2.metric("Surface MAE", _format_num(float(np.mean(np.abs(err)))))
-    c3.metric("Max |Error|", _format_num(float(np.max(np.abs(err)))))
-
-    if PLOTLY_AVAILABLE:
-        fig3d = _surface_3d_figure(obs[idx], pred[idx], x_grid, tenor_days)
-        st.plotly_chart(fig3d, use_container_width=True)
-    else:
-        st.warning("Install `plotly` to enable interactive 3D surface overlays.")
-
-    overlay_mode = st.radio(
-        "Slice overlay mode",
-        ["By tenor", "By moneyness"],
-        horizontal=True,
-        key="surface_slice_mode",
-    )
-
-    if overlay_mode == "By tenor":
-        tenor_options = [int(t) for t in tenor_days.tolist()]
-        defaults = [t for t in (30, 90) if t in tenor_options]
-        if not defaults:
-            defaults = tenor_options[: min(2, len(tenor_options))]
-        selected = st.multiselect("Tenor(s)", options=tenor_options, default=defaults, key="slice_tenors")
-        selected = selected or [tenor_options[0]]
-        mode = "tenor"
-        df = _surface_slice_df(obs[idx], pred[idx], x_grid, tenor_days, mode=mode, selected=[float(x) for x in selected])
-    else:
-        x_options = [float(x) for x in x_grid.tolist()]
-        defaults = []
-        for target in (-0.10, 0.0, 0.10):
-            defaults.append(float(x_options[int(np.argmin(np.abs(np.array(x_options) - target)))]))
-        defaults = sorted(set(defaults))
-        selected = st.multiselect(
-            "Moneyness point(s)",
-            options=x_options,
-            default=defaults,
-            format_func=lambda x: f"{x:.2f}",
-            key="slice_x",
-        )
-        selected = selected or [0.0]
-        mode = "moneyness"
-        df = _surface_slice_df(obs[idx], pred[idx], x_grid, tenor_days, mode=mode, selected=[float(x) for x in selected])
-
-    chart = _slice_overlay_chart(df, mode=mode)
-    if PLOTLY_AVAILABLE and chart is not None and hasattr(chart, "to_plotly_json"):
-        st.plotly_chart(chart, use_container_width=True)
-    else:
-        st.altair_chart(chart, use_container_width=True)
+def _train_history_tail_rows(run_dir: Path, n: int = 8) -> list[dict[str, Any]]:
+    hist_path = run_dir / "train_history.csv"
+    if not hist_path.exists():
+        return []
+    try:
+        hist = pd.read_csv(hist_path)
+    except Exception:
+        return []
+    if hist.empty:
+        return []
+    return hist.tail(n).to_dict(orient="records")
 
 
-def _render_prediction_tab(eval_dir: Path, metrics: dict) -> None:
-    st.caption("Contract-level prediction quality with residual diagnostics and error concentration.")
-
-    pred_path = eval_dir / "contract_predictions.parquet"
-    if not pred_path.exists():
-        st.info("No evaluation predictions found.")
-        return
-
-    pred = _read_parquet_or_csv(pred_path)
-    pred_test = pred[pred["split"] == "test"].copy() if "split" in pred.columns else pred.copy()
-    if pred_test.empty:
-        st.info("No prediction records available.")
-        return
-
-    pred_test["error"] = pd.to_numeric(pred_test["pred_price_norm"], errors="coerce") - pd.to_numeric(
-        pred_test["target_price_norm"], errors="coerce"
-    )
-    pred_test["abs_error"] = pred_test["error"].abs()
-
-    stat = _compute_prediction_stats(pred_test)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("RMSE", _format_num(metrics.get("price_rmse")))
-    c2.metric("MAE", _format_num(metrics.get("price_mae")))
-    c3.metric("Next-Day R2", _format_num(metrics.get("next_price_r2", metrics.get("price_r2")), 3))
-    c4.metric("Bias", _format_num(stat.get("bias")))
-
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Median |Error|", _format_num(stat.get("median_abs_error")))
-    c6.metric("P95 |Error|", _format_num(stat.get("p95_abs_error")))
-    c7.metric("|Err|<=0.01", _format_num(100.0 * stat.get("within_1pct_abs", np.nan), 2) + "%")
-    c8.metric("|Err|<=0.02", _format_num(100.0 * stat.get("within_2pct_abs", np.nan), 2) + "%")
-
-    sample = pred_test.sample(min(len(pred_test), 8000), random_state=7)
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        scatter = (
-            alt.Chart(sample)
-            .mark_circle(size=20, opacity=0.35)
-            .encode(
-                x=alt.X("target_price_norm:Q", title="Observed price"),
-                y=alt.Y("pred_price_norm:Q", title="Predicted price"),
-                color=alt.Color("call_put:N", scale=alt.Scale(scheme="set2")),
-                tooltip=["date", "symbol", "dte", "target_price_norm", "pred_price_norm", "error"],
-            )
-            .properties(height=320, title="Predicted vs Observed")
-        )
-        top = float(max(sample["target_price_norm"].max(), sample["pred_price_norm"].max()))
-        ref = alt.Chart(pd.DataFrame({"v": [0.0, top]})).mark_line(color="#111827").encode(x="v:Q", y="v:Q")
-        st.altair_chart(scatter + ref, use_container_width=True)
-
-    with col_b:
-        hist = (
-            alt.Chart(pred_test)
-            .mark_bar(opacity=0.85)
-            .encode(
-                alt.X("error:Q", bin=alt.Bin(maxbins=70), title="Prediction error"),
-                alt.Y("count():Q", title="Count"),
-            )
-            .properties(height=320, title="Error Distribution")
-        )
-        st.altair_chart(hist, use_container_width=True)
-
-    pred_test["dte_bucket"] = pd.cut(
-        pred_test["dte"],
-        bins=[0, 14, 30, 60, 90, 180, 3650],
-        labels=["<=14", "15-30", "31-60", "61-90", "91-180", ">180"],
-        include_lowest=True,
-    )
-
-    bucket_stats = (
-        pred_test.groupby(["call_put", "dte_bucket"], dropna=False, observed=False)
-        .agg(
-            n=("error", "count"),
-            rmse=("error", lambda x: float(np.sqrt(np.mean(np.square(x)))) if len(x) else np.nan),
-            mae=("abs_error", "mean"),
-            bias=("error", "mean"),
-        )
-        .reset_index()
-        .sort_values(["call_put", "dte_bucket"])
-    )
-    st.dataframe(bucket_stats, use_container_width=True, hide_index=True)
+def _append_report(report: dict[str, Any]) -> None:
+    reports = st.session_state.get(RUN_REPORTS_KEY)
+    if not isinstance(reports, list):
+        reports = []
+    reports.append(report)
+    st.session_state[RUN_REPORTS_KEY] = reports
 
 
-def _render_training_tab(run_dir: Path) -> None:
-    st.caption("Model optimization diagnostics by stage with compact fit-over-time signals.")
+def _render_training_diagnostics(run_dir: Path) -> None:
+    st.subheader("Training Diagnostics")
 
     hist_path = run_dir / "train_history.csv"
-    cfg_path = run_dir / "train_config.json"
     if not hist_path.exists():
-        st.info("No training history found.")
+        st.info("No training history found for selected run.")
         return
 
     hist = pd.read_csv(hist_path)
-    hist["epoch"] = pd.to_numeric(hist["epoch"], errors="coerce")
-
-    numeric_cols = [c for c in hist.columns if c not in {"stage", "epoch"} and pd.api.types.is_numeric_dtype(hist[c])]
-    metric = st.selectbox("Training metric", options=numeric_cols, index=0 if numeric_cols else None)
-
-    if metric:
-        plot_df = hist[["stage", "epoch", metric]].dropna()
-        if not plot_df.empty:
-            ch = (
-                alt.Chart(plot_df)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("epoch:Q"),
-                    y=alt.Y(f"{metric}:Q", title=metric),
-                    color=alt.Color("stage:N"),
-                    tooltip=["stage", "epoch", metric],
-                )
-                .properties(height=320, title=f"{metric} by Stage")
-            )
-            st.altair_chart(ch, use_container_width=True)
-
-    if "val_recon_loss" in hist.columns:
-        recon_df = hist[["stage", "epoch", "val_recon_loss"]].dropna()
-        if not recon_df.empty:
-            recon_ch = (
-                alt.Chart(recon_df)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("epoch:Q"),
-                    y=alt.Y("val_recon_loss:Q", title="val_recon_loss"),
-                    color=alt.Color("stage:N"),
-                    tooltip=["stage", "epoch", "val_recon_loss"],
-                )
-                .properties(height=260, title="Validation Reconstruction")
-            )
-            st.altair_chart(recon_ch, use_container_width=True)
-
-    by_stage = hist.groupby("stage", dropna=False).agg(
-        epochs=("epoch", "count"),
-        final_loss=("loss", "last") if "loss" in hist.columns else ("epoch", "count"),
-        min_loss=("loss", "min") if "loss" in hist.columns else ("epoch", "count"),
-        final_val_recon=("val_recon_loss", "last") if "val_recon_loss" in hist.columns else ("epoch", "count"),
-    )
-    st.dataframe(by_stage.reset_index(), use_container_width=True, hide_index=True)
-
-    cfg = _read_json(cfg_path)
-    if cfg:
-        with st.expander("Training config"):
-            st.json(cfg)
-
-
-def _render_fits_tab(eval_dir: Path, metrics: dict) -> None:
-    st.caption("Fit diagnostics: surface-level quality, no-arbitrage behavior, and temporal fit stability.")
-
-    surf = _load_surface_eval(eval_dir)
-    noarb_path = eval_dir / "noarb_test_dates.parquet"
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Surface RMSE", _format_num(metrics.get("surface_iv_rmse")))
-    c2.metric("Surface MAE", _format_num(metrics.get("surface_iv_mae")))
-    c3.metric("Cal Viol (Pred)", _format_num(metrics.get("calendar_violation_pred_mean")))
-    c4.metric("Bfly Viol (Pred)", _format_num(metrics.get("butterfly_violation_pred_mean")))
-
-    if surf is not None:
-        dates = pd.to_datetime(surf["dates"].astype(str))
-        obs = surf["iv_surface_obs"].astype(np.float32)
-        pred = surf["iv_surface_pred"].astype(np.float32)
-
-        rmse_by_date = np.sqrt(np.mean((pred - obs) ** 2, axis=(1, 2)))
-        mae_by_date = np.mean(np.abs(pred - obs), axis=(1, 2))
-
-        fit_df = pd.DataFrame(
-            {
-                "date": dates,
-                "surface_rmse": rmse_by_date,
-                "surface_mae": mae_by_date,
-            }
-        )
-
-        fit_chart = (
-            alt.Chart(fit_df)
-            .transform_fold(["surface_rmse", "surface_mae"], as_=["metric", "value"])
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("date:T"),
-                y=alt.Y("value:Q"),
-                color=alt.Color("metric:N"),
-                tooltip=["date:T", "metric:N", "value:Q"],
-            )
-            .properties(height=280, title="Surface Fit Over Time")
-        )
-        st.altair_chart(fit_chart, use_container_width=True)
-
-    if noarb_path.exists():
-        noarb = _read_parquet_or_csv(noarb_path)
-        noarb["date"] = pd.to_datetime(noarb["date"])
-        long = noarb.melt(
-            id_vars=["date"],
-            value_vars=["calendar_obs", "calendar_pred", "butterfly_obs", "butterfly_pred"],
-            var_name="series",
-            value_name="value",
-        )
-        noarb_chart = (
-            alt.Chart(long)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("date:T"),
-                y=alt.Y("value:Q", title="Violation Rate"),
-                color=alt.Color("series:N"),
-                tooltip=["date:T", "series:N", "value:Q"],
-            )
-            .properties(height=280, title="No-Arbitrage Diagnostics")
-        )
-        st.altair_chart(noarb_chart, use_container_width=True)
-
-
-def render_dashboard(run_dir: Path) -> None:
-    st.title("IV Dynamics Research Console")
-    st.caption("Professional research dashboard for returns, fit quality, execution realism, and cross-symbol reporting.")
-
-    if not run_dir.exists():
-        st.error(f"Run directory does not exist: {run_dir}")
+    if hist.empty:
+        st.info("Training history file is empty.")
         return
 
-    eval_dir = run_dir / "evaluation"
-    bt_dir = run_dir / "backtest"
+    numeric_cols = [
+        c for c in hist.columns if c not in {"stage", "epoch"} and pd.api.types.is_numeric_dtype(hist[c])
+    ]
+    if not numeric_cols:
+        st.dataframe(hist.tail(50), use_container_width=True)
+        return
 
-    train_summary = _read_json(run_dir / "train_summary.json")
+    stage_options = ["all"] + sorted(str(x) for x in hist["stage"].dropna().unique()) if "stage" in hist.columns else ["all"]
+    selected_stage = st.selectbox("Stage filter", options=stage_options, index=0, key="diag_train_stage")
+
+    chart_df = hist.copy()
+    if selected_stage != "all" and "stage" in chart_df.columns:
+        chart_df = chart_df[chart_df["stage"] == selected_stage].copy()
+
+    metric_pick = st.selectbox("Metric", options=numeric_cols, index=0, key="diag_train_metric")
+    if chart_df.empty:
+        st.info("No rows match the selected stage.")
+        return
+
+    chart = (
+        alt.Chart(chart_df)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("epoch:Q", title="Epoch"),
+            y=alt.Y(f"{metric_pick}:Q", title=metric_pick),
+            color=alt.Color("stage:N") if "stage" in chart_df.columns else alt.value("#14532d"),
+            tooltip=[c for c in ["stage", "epoch", metric_pick] if c in chart_df.columns],
+        )
+        .properties(height=360)
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.dataframe(chart_df.tail(40), use_container_width=True)
+
+
+def _render_eval_diagnostics(run_dir: Path) -> None:
+    st.subheader("Evaluation Diagnostics")
+    eval_dir = run_dir / "evaluation"
+
     metrics = _read_json(eval_dir / "metrics.json")
-    bt_summary = _read_json(bt_dir / "summary.json")
-    symbol = _extract_symbol_from_run_dir(run_dir) or str(bt_summary.get("underlying_symbol", "n/a")).upper()
-    generated_at = str(bt_summary.get("generated_at_utc", "n/a"))
-    backtest_version = str(bt_summary.get("backtest_version", "n/a"))
+    if metrics:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Price RMSE", _format_value(metrics.get("price_rmse"), 6))
+        c2.metric("Price R2", _format_value(metrics.get("price_r2"), 6))
+        c3.metric("Exec Brier", _format_value(metrics.get("exec_brier"), 6))
+        c4.metric("Surface Forecast RMSE", _format_value(metrics.get("surface_forecast_iv_rmse"), 6))
+
+        with st.expander("Full Metrics JSON", expanded=False):
+            st.json(metrics)
+    else:
+        st.warning("No evaluation metrics found.")
+
+    pred_df = _read_parquet_or_csv(eval_dir / "contract_predictions.parquet")
+    if pred_df.empty:
+        st.info("No contract_predictions artifact found.")
+        return
+
+    for col in ["target_price_norm", "pred_price_norm", "dte"]:
+        if col in pred_df.columns:
+            pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce")
+
+    pred_df = pred_df.dropna(subset=[c for c in ["target_price_norm", "pred_price_norm"] if c in pred_df.columns]).copy()
+    if pred_df.empty:
+        st.info("Predictions artifact has no valid numeric rows.")
+        return
+
+    pred_df["abs_error"] = (pred_df["pred_price_norm"] - pred_df["target_price_norm"]).abs()
+
+    scatter = (
+        alt.Chart(pred_df.sample(min(4000, len(pred_df)), random_state=7))
+        .mark_circle(opacity=0.35, size=36, color="#14532d")
+        .encode(
+            x=alt.X("target_price_norm:Q", title="Target price (normalized)"),
+            y=alt.Y("pred_price_norm:Q", title="Predicted price (normalized)"),
+            tooltip=[c for c in ["date", "symbol", "dte", "target_price_norm", "pred_price_norm", "abs_error"] if c in pred_df.columns],
+        )
+        .properties(height=360)
+    )
+    st.altair_chart(scatter, use_container_width=True)
+
+    hist = (
+        alt.Chart(pred_df)
+        .mark_bar(color="#166534")
+        .encode(
+            x=alt.X("abs_error:Q", bin=alt.Bin(maxbins=50), title="Absolute error"),
+            y=alt.Y("count():Q", title="Count"),
+            tooltip=[alt.Tooltip("count():Q", title="Rows")],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(hist, use_container_width=True)
+
+    if "dte" in pred_df.columns:
+        bins = [0, 14, 30, 60, 90, 180, 3650]
+        labels = ["<=14", "15-30", "31-60", "61-90", "91-180", ">180"]
+        pred_df["dte_bucket"] = pd.cut(pred_df["dte"], bins=bins, labels=labels, include_lowest=True)
+        bucket = (
+            pred_df.groupby("dte_bucket", dropna=False, observed=False)
+            .agg(n=("abs_error", "count"), mae=("abs_error", "mean"), p95=("abs_error", lambda x: float(x.quantile(0.95))))
+            .reset_index()
+        )
+        st.dataframe(bucket, use_container_width=True, hide_index=True)
+
+
+def _render_run_overview(run_dir: Path) -> None:
+    if not run_dir.exists() or not run_dir.is_dir():
+        st.info("Select a valid run directory in the sidebar.")
+        return
+
+    report = _build_artifact_report(run_dir)
+    metrics = report.get("evaluation_metrics", {})
+    train_summary = report.get("train_summary", {})
+    symbol = _extract_symbol_from_run_dir(run_dir) or "n/a"
 
     st.markdown(
         (
-            "<div class='console-hero'>"
-            f"<div class='title'>Run: {run_dir.name} ({symbol})</div>"
-            f"<div class='meta'>Backtest version: {backtest_version} | Generated UTC: {generated_at}</div>"
+            "<div class='block-note'>"
+            f"<b>Symbol</b>: <code>{symbol}</code><br>"
+            f"<b>Run directory</b>: <code>{report.get('run_dir', 'n/a')}</code><br>"
+            f"<b>Last updated (UTC)</b>: <code>{report.get('run_updated_utc', 'n/a')}</code>"
             "</div>"
         ),
         unsafe_allow_html=True,
     )
 
-    top1, top2, top3, top4, top5, top6 = st.columns(6)
-    top1.metric("Price RMSE", _format_num(metrics.get("price_rmse")))
-    top2.metric("Surface RMSE", _format_num(metrics.get("surface_iv_rmse")))
-    top3.metric("Backtest PnL", _format_num(bt_summary.get("total_pnl"), 2))
-    top4.metric("Backtest Sharpe", _format_num(bt_summary.get("daily_sharpe"), 3))
-    top5.metric("Total Fees", _format_num(bt_summary.get("total_fees"), 2))
-    top6.metric("Hedge Policy", str(bt_summary.get("hedge_policy", "fixed")).lower())
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Price RMSE", _format_value(metrics.get("price_rmse"), 6))
+    c2.metric("Price R2", _format_value(metrics.get("price_r2"), 6))
+    c3.metric("Exec Brier", _format_value(metrics.get("exec_brier"), 6))
+    c4.metric("Surface Forecast RMSE", _format_value(metrics.get("surface_forecast_iv_rmse"), 6))
+    c5.metric("Final Val Recon", _format_value(train_summary.get("final_val_recon"), 6))
 
-    report_paths = [
-        run_dir / "train_history.csv",
-        run_dir / "train_summary.json",
-        run_dir / "train_config.json",
-        eval_dir / "metrics.json",
-        eval_dir / "contract_predictions.parquet",
-        eval_dir / "noarb_test_dates.parquet",
-        eval_dir / "surface_predictions.npz",
-        bt_dir / "daily.parquet",
-        bt_dir / "trades.parquet",
-        bt_dir / "summary.json",
-    ]
-    symbol_runs = _discover_latest_runs_by_symbol(Path("outputs"))
-    all_symbols_df = _collect_multi_symbol_summary(symbol_runs)
-    all_symbols_items = tuple((sym, str(path.resolve())) for sym, path in sorted(symbol_runs.items()))
-    all_symbols_paths = _all_symbols_report_paths(symbol_runs)
+    st.subheader("Training Summary")
+    st.json(train_summary, expanded=False)
 
-    with st.expander("Report", expanded=False):
-        st.markdown(
-            "<div class='block-note'>Comprehensive export options: single-run detailed PDF and all-symbol portfolio PDF with costs/execution settings.</div>",
-            unsafe_allow_html=True,
-        )
-        if not all_symbols_df.empty:
-            overview_cols = [
-                c
-                for c in [
-                    "symbol",
-                    "run_name",
-                    "backtest_version",
-                    "total_pnl",
-                    "daily_sharpe",
-                    "total_fees",
-                    "slippage_bps",
-                    "spread_cross_fraction",
-                ]
-                if c in all_symbols_df.columns
-            ]
-            st.dataframe(
-                all_symbols_df[overview_cols],
-                use_container_width=True,
-                hide_index=True,
+    st.subheader("Evaluation Metrics")
+    st.json(metrics, expanded=False)
+
+    training_parameters = report.get("training_parameters", {})
+    st.subheader("Training Parameters (train_config.json)")
+    st.json(training_parameters, expanded=False)
+
+    tail = report.get("train_history_tail", [])
+    if isinstance(tail, list) and tail:
+        st.subheader("Train History Tail")
+        st.dataframe(pd.DataFrame(tail), use_container_width=True, hide_index=True)
+
+    manifest = report.get("artifact_manifest", [])
+    if isinstance(manifest, list) and manifest:
+        st.subheader("Artifact Manifest")
+        st.dataframe(pd.DataFrame(manifest), use_container_width=True, hide_index=True)
+
+
+def _render_openai_tab(run_dir: Path) -> None:
+    st.subheader("OpenAI GPT-5 Improvement Suggestions")
+    if not run_dir.exists() or not run_dir.is_dir():
+        st.info("Select a valid run directory in the sidebar.")
+        return
+
+    timeout_seconds = int(os.environ.get("OPENAI_TIMEOUT_SECONDS", "240"))
+    max_retries = int(os.environ.get("OPENAI_MAX_RETRIES", "3"))
+    st.caption(f"Request settings: timeout={timeout_seconds}s, retries={max_retries}, model={OPENAI_MODEL}")
+
+    if st.button("Generate Suggestions For Selected Run", type="primary", use_container_width=False):
+        report = _build_artifact_report(run_dir)
+        report["openai_model"] = OPENAI_MODEL
+        with st.spinner("Requesting GPT-5 improvement suggestions..."):
+            req_payload, suggestions, raw, err = _request_openai_feedback(
+                report,
+                model=OPENAI_MODEL,
+                timeout_seconds=timeout_seconds,
             )
-            with st.expander("All Per-Symbol Fields", expanded=False):
-                full_df = all_symbols_df.sort_values("symbol").reset_index(drop=True)
-                st.dataframe(full_df, use_container_width=True, hide_index=True)
-                st.download_button(
-                    label="Download All-Symbol Fields (CSV)",
-                    data=full_df.to_csv(index=False).encode("utf-8"),
-                    file_name="ivdyn_all_symbols_fields.csv",
-                    mime="text/csv",
-                )
-
-        try:
-            pdf_bytes = _build_pdf_report_cached(str(run_dir.resolve()), _artifact_signature(report_paths))
-            st.download_button(
-                label="Download PDF Report",
-                data=pdf_bytes,
-                file_name=f"{run_dir.name}_report.pdf",
-                mime="application/pdf",
-            )
-        except Exception as exc:
-            st.warning(f"PDF export unavailable: {exc}")
-        if all_symbols_items:
-            try:
-                portfolio_pdf = _build_all_symbols_pdf_report_cached(
-                    all_symbols_items,
-                    _artifact_signature(all_symbols_paths),
-                )
-                st.download_button(
-                    label="Download All Symbols PDF",
-                    data=portfolio_pdf,
-                    file_name="ivdyn_all_symbols_report.pdf",
-                    mime="application/pdf",
-                )
-            except Exception as exc:
-                st.warning(f"All-symbol PDF export unavailable: {exc}")
+        report["openai_request_payload"] = req_payload
+        report["openai_suggestions"] = suggestions
+        report["openai_response_raw"] = raw
+        report["openai_error"] = err
+        _append_report(report)
+        if err:
+            st.error(err)
         else:
-            st.info("No symbol runs discovered for all-symbol report export.")
+            st.success("OpenAI suggestions generated.")
 
-    tabs = st.tabs(["Backtest & PnL", "Surface Overlays", "Prediction Errors", "Training Diagnostics", "Fits"])
+    st.caption(f"Current selected run: `{run_dir.resolve()}`")
 
-    with tabs[0]:
-        _render_backtest_tab(bt_dir)
+    reports = st.session_state.get(RUN_REPORTS_KEY, [])
+    if not isinstance(reports, list):
+        reports = []
+    selected_run_reports = [r for r in reports if str(r.get("run_dir", "")) == str(run_dir.resolve())]
+    if not selected_run_reports:
+        st.info("No OpenAI suggestions generated yet for this run.")
+        return
 
-    with tabs[1]:
-        _render_surface_tab(eval_dir)
+    for i, report in enumerate(reversed(selected_run_reports), start=1):
+        label = f"{i}. {report.get('timestamp_utc', 'n/a')}"
+        with st.expander(label, expanded=(i == 1)):
+            st.write(f"Model selected: `{report.get('openai_model', OPENAI_MODEL)}`")
 
-    with tabs[2]:
-        _render_prediction_tab(eval_dir, metrics)
+            req_payload = report.get("openai_request_payload")
+            if isinstance(req_payload, dict) and req_payload:
+                st.caption("Request payload sent to OpenAI API service")
+                st.json(req_payload, expanded=False)
+            else:
+                st.caption("No OpenAI request payload captured for this run.")
 
-    with tabs[3]:
-        _render_training_tab(run_dir)
+            openai_error = report.get("openai_error")
+            if openai_error:
+                st.error(str(openai_error))
 
-    with tabs[4]:
-        _render_fits_tab(eval_dir, metrics)
+            suggestion_text = report.get("openai_suggestions")
+            if isinstance(suggestion_text, str) and suggestion_text.strip():
+                st.caption("Parsed response text")
+                st.text_area(
+                    "Suggestions",
+                    value=suggestion_text,
+                    height=320,
+                    key=f"openai_suggestions_{report.get('id', i)}",
+                    disabled=True,
+                )
 
-    with st.expander("Raw JSON"):
-        st.write(
-            {
-                "train_summary": train_summary,
-                "eval_metrics": metrics,
-                "backtest_summary": bt_summary,
-            }
-        )
+            raw = report.get("openai_response_raw")
+            if isinstance(raw, dict) and raw:
+                with st.expander("Raw OpenAI response JSON", expanded=False):
+                    st.json(raw, expanded=False)
 
 
 def main() -> None:
-    st.set_page_config(page_title="IV Dynamics Dashboard", layout="wide")
+    _load_dotenv()
+    _ensure_state()
+
+    st.set_page_config(page_title="ivdyn: Training + Evaluation", layout="wide")
     _inject_style()
-    _apply_pending_window_switch()
-    run_dir = _resolve_run_dir()
-    _snapshot_tuning_state_to_cache(run_dir)
-    window = _render_backtest_sidebar_window_toggle()
-    dataset_raw = str(st.session_state.get("dataset_path", "")).strip()
-    dataset_path = Path(dataset_raw).expanduser() if dataset_raw else None
-    if window == _WINDOW_TUNING:
-        _render_backtest_tuning_window(run_dir=run_dir, dataset_path=dataset_path)
-        return
-    render_dashboard(run_dir)
+
+    st.title("ivdyn: Training + Evaluation Center")
+    st.caption("Backtest UI removed. This view is now for training/evaluation artifact inspection.")
+
+    outputs_root = Path("outputs")
+    discovered_runs = _discover_run_dirs(outputs_root)
+    run_options = [str(p) for p in discovered_runs]
+    latest_runs_by_symbol = _discover_latest_runs_by_symbol(outputs_root)
+    symbol_options = sorted(latest_runs_by_symbol)
+
+    active_default = str(st.session_state.get(ACTIVE_RUN_KEY, "") or "")
+    if not active_default:
+        if latest_runs_by_symbol:
+            newest_run = max(latest_runs_by_symbol.values(), key=_run_recency)
+            active_default = str(newest_run)
+        elif run_options:
+            active_default = run_options[0]
+    elif latest_runs_by_symbol and not Path(active_default).exists():
+        newest_run = max(latest_runs_by_symbol.values(), key=_run_recency)
+        active_default = str(newest_run)
+    elif run_options and active_default not in run_options:
+        active_default = run_options[0]
+
+    with st.sidebar:
+        st.header("Inspect Run")
+        inspect_source_choices = ["Latest by symbol", "Manual run directory"]
+        default_source_idx = 0 if symbol_options else 1
+        inspect_source = st.radio("Inspect source", options=inspect_source_choices, index=default_source_idx)
+
+        if inspect_source == "Latest by symbol" and symbol_options:
+            default_symbol = _extract_symbol_from_run_dir(Path(active_default)) if active_default else None
+            if default_symbol not in latest_runs_by_symbol:
+                newest_run = max(latest_runs_by_symbol.values(), key=_run_recency)
+                default_symbol = _extract_symbol_from_run_dir(newest_run) or symbol_options[0]
+            default_symbol_idx = symbol_options.index(default_symbol) if default_symbol in symbol_options else 0
+            selected_symbol = st.selectbox("Symbol (latest run)", options=symbol_options, index=default_symbol_idx)
+            inspect_run_raw = str(latest_runs_by_symbol[selected_symbol])
+            st.text_input("Resolved run directory", value=inspect_run_raw, disabled=True)
+        else:
+            inspect_run_raw = st.text_input("Run directory", value=active_default)
+            if run_options:
+                idx = run_options.index(active_default) if active_default in run_options else 0
+                picked = st.selectbox("Recent discovered runs", options=run_options, index=idx)
+                if picked and picked != inspect_run_raw:
+                    inspect_run_raw = picked
+
+    inspect_run = Path(inspect_run_raw).expanduser()
+    if inspect_run.exists() and inspect_run.is_dir():
+        st.session_state[ACTIVE_RUN_KEY] = str(inspect_run.resolve())
+
+    tabs = st.tabs(["Run Overview", "Training Diagnostics", "Evaluation Diagnostics", "OpenAI Suggestions"])
+
+    with tabs[0]:
+        _render_run_overview(inspect_run)
+
+    with tabs[1]:
+        if not inspect_run.exists() or not inspect_run.is_dir():
+            st.info("Select a valid run directory in the sidebar to view training diagnostics.")
+        else:
+            _render_training_diagnostics(inspect_run)
+
+    with tabs[2]:
+        if not inspect_run.exists() or not inspect_run.is_dir():
+            st.info("Select a valid run directory in the sidebar to view evaluation diagnostics.")
+        else:
+            _render_eval_diagnostics(inspect_run)
+
+    with tabs[3]:
+        _render_openai_tab(inspect_run)
 
 
 if __name__ == "__main__":
